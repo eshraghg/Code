@@ -84,7 +84,7 @@ def filter_outliers_iterative(t, q, threshold=3, max_iterations=5):
     
     return mask, popt
 
-def plot_arps_fit(df_well, t, q, mask, popt, well_id, df_full, q_original, q_smoothed, outlier_threshold, forecast_avg_points=1):
+def plot_arps_fit(df_well, t, q, mask, popt, well_id, df_full, q_original, q_smoothed, outlier_threshold, forecast_avg_points=1, start_method=""):
     """Plot actual production vs Arps Hyperbolic model with outliers marked and constant-width channel"""
     if popt is None:
         print("No fit available to plot.")
@@ -168,7 +168,10 @@ def plot_arps_fit(df_well, t, q, mask, popt, well_id, df_full, q_original, q_smo
     
     plt.xlabel('Date')
     plt.ylabel('Oil Production Rate (bbl/day)')
-    plt.title(f'Well {well_id}')
+    title = f'Well {well_id}'
+    if start_method:
+        title += f'\nStart Index Method: {start_method}'
+    plt.title(title)
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.ylim(bottom=0)  # Ensure y-axis starts at 0
@@ -369,7 +372,7 @@ def find_last_production_period(df_well, rate_col='M_Oil_Prod',
                                  min_production_months=12,
                                  surge_multiplier=3.5,
                                  gap_threshold=0.25,
-                                 lookback_window=10):
+                                 lookback_window=20):
     """
     Detect the start of the last stable production period by identifying
     major shut-ins, workovers, or production surges.
@@ -500,7 +503,7 @@ def find_last_production_period(df_well, rate_col='M_Oil_Prod',
 # Modified version of your main function
 def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2, 
                            forecast_avg_points=6, manual_start_idx=None,
-                           detect_period=True):
+                           detect_period=True, start_method=""):
     """
     Run Arps analysis with automatic detection of last production period
     
@@ -602,7 +605,7 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
     
     plot_arps_fit(df_well, t, q, mask, popt, well_name, df_full, 
                   q_original_full, q_smoothed_full, outlier_threshold, 
-                  forecast_avg_points)
+                  forecast_avg_points, start_method)
 
 # --- Usage ---
 df_all = pd.read_csv('OFM202409.csv', low_memory=False)
@@ -610,7 +613,8 @@ df_all = pd.read_csv('OFM202409.csv', low_memory=False)
 
 
 # Choose a well to analyze
-well_name = df_all['Well_Name'].unique()[11]
+well_num = 12
+well_name = df_all['Well_Name'].unique()[well_num]
 df_well_temp = df_all[df_all['Well_Name'] == well_name]
 
 # Method 1: Automatic production period detection
@@ -626,13 +630,33 @@ decline_idx = find_decline_start_last_major_drop(
 
 print(f"\nAuto-detected period start: index {auto_idx}")
 print(f"Decline curve start: index {decline_idx}")
-print(f"Recommendation: Use index {max(auto_idx, decline_idx)} for most conservative analysis")
 
-# Run with the chosen index
+# Validate decline_idx
+df_well_sorted = df_well_temp.sort_values('Prod_Date')
+rate_series = df_well_sorted['M_Oil_Prod'].values
+if decline_idx < len(rate_series):
+    # Check if decline_idx is too early (rate at decline start is less than 80% of max rate after it)
+    decline_rate = rate_series[decline_idx]
+    future_max = np.max(rate_series[decline_idx:])
+    if decline_rate < 0.8 * future_max:
+        print(f"Warning: decline_idx appears too early (rate at start < 80% of future max)")
+        print(f"Using auto_idx ({auto_idx}) instead")
+        chosen_idx = auto_idx
+    else:
+        print(f"Using decline_idx ({decline_idx}) as it appears appropriate")
+        chosen_idx = decline_idx
+else:
+    print(f"Warning: decline_idx ({decline_idx}) out of range")
+    print(f"Using auto_idx ({auto_idx}) instead")
+    chosen_idx = auto_idx
+
+# Run with the chosen index and method label
+method_label = "Smoothing Decline Analysis" if chosen_idx == decline_idx else "Auto-Detected Recent Period"
 run_arps_for_well_auto(
     df_all, 
     well_name, 
-    manual_start_idx=max(auto_idx, decline_idx),
-    outlier_threshold=3,
-    forecast_avg_points=6
+    manual_start_idx=chosen_idx,
+    start_method=method_label,
+    outlier_threshold=2,
+    forecast_avg_points=2
 )
