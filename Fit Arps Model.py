@@ -579,9 +579,9 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
     q = df_well['oil_prod_daily'].values
     
     # Assess if we have enough data
-    if len(q) < 12:
-        print(f"ERROR: Insufficient data points ({len(q)}). Need at least 12 months.")
-        return
+    # if len(q) < 12:
+    #     print(f"ERROR: Insufficient data points ({len(q)}). Need at least 12 months.")
+    #     return
     
     print("--- Starting iterative outlier filtering ---")
     mask, popt = filter_outliers_iterative(t, q, threshold=outlier_threshold)
@@ -613,7 +613,7 @@ df_all = pd.read_csv('OFM202409.csv', low_memory=False)
 
 
 # Choose a well to analyze
-well_num = 12
+well_num = 16
 well_name = df_all['Well_Name'].unique()[well_num]
 df_well_temp = df_all[df_all['Well_Name'] == well_name]
 
@@ -624,8 +624,8 @@ auto_idx = find_last_production_period(df_well_temp)
 decline_idx = find_decline_start_last_major_drop(
     df_well_temp,
     smooth_window=20,
-    min_decline_months=6,
-    drop_frac=0.9
+    min_decline_months=12,
+    drop_frac=0.3
 )
 
 print(f"\nAuto-detected period start: index {auto_idx}")
