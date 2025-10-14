@@ -133,26 +133,59 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
     forecast_months = 60  # 5 years
     forecast_dates = pd.date_range(start=last_date + pd.DateOffset(months=1), periods=forecast_months, freq='MS')
     
-    # Create consistent time array for forecast (continues from last historical t value)
+    # FIXED: Forecast time continues from historical data (uses fitted t values)
+    # The fit was performed on t (time from start of decline period)
+    # So forecast should continue from where the fit ended
     last_t = t[-1]
-    forecast_t = np.arange(1, forecast_months + 1) + last_t
+    forecast_t = last_t + np.arange(1, forecast_months + 1)
     
-    forecast_q = arps_hyperbolic(forecast_t, *popt)
-    
+    # Determine the initial forecast rate based on user preference
     if forecast_avg_points > 1:
         n_points = min(forecast_avg_points, np.sum(mask))
         initial_rate = np.mean(q[mask][-n_points:])
         print(f"\nUsing average of last {n_points} rates as initial forecast rate: {initial_rate:.2f} bbl/day")
     elif forecast_avg_points == 0:
-        initial_rate = forecast_q[0]  
-        print(f"\nUsing last fitted model point as initial forecast rate: {initial_rate:.2f} bbl/day")
+        # Use the fitted model prediction at the last historical point
+        initial_rate = arps_hyperbolic(last_t, *popt)
+        print(f"\nUsing fitted model value at last historical point as initial forecast rate: {initial_rate:.2f} bbl/day")
     else:
         initial_rate = q[mask][-1]
         print(f"\nUsing last historical rate as initial forecast rate: {initial_rate:.2f} bbl/day")
     
-    if forecast_avg_points != 0:  
-        scaling_factor = initial_rate / forecast_q[0]
-        forecast_q = forecast_q * scaling_factor
+    # FIXED: To maintain the same decline rate, we need to shift the time reference
+    # The Arps equation: q = qi / (1 + b*Di*t)^(1/b)
+    # The instantaneous decline rate depends on both the parameters AND the current production rate
+    
+    if forecast_avg_points != 0:
+        qi_original, Di, b = popt
+        
+        # The fitted model predicts this rate at last_t
+        fitted_rate_at_last_t = arps_hyperbolic(last_t, qi_original, Di, b)
+        
+        # We want to start at initial_rate instead
+        # To preserve the decline behavior, we solve for what t_effective would give us initial_rate
+        # initial_rate = qi / (1 + b*Di*t_effective)^(1/b)
+        # Solving: t_effective = (1/Di) * ((qi/initial_rate)^b - 1) / b
+        
+        if initial_rate > 0 and b > 0 and Di > 0:
+            # Calculate the effective time that corresponds to the initial_rate
+            t_effective = (1/(b * Di)) * ((qi_original/initial_rate)**b - 1)
+            
+            # Now shift the forecast time so it continues from this effective time
+            # This preserves the decline curve shape and rate
+            forecast_t_shifted = t_effective + np.arange(1, forecast_months + 1)
+            forecast_q = arps_hyperbolic(forecast_t_shifted, qi_original, Di, b)
+            
+            print(f"Time-shifted forecast: t_effective={t_effective:.2f}, preserving decline rate Di={Di:.4f}, b={b:.2f}")
+        else:
+            # Fallback to original method if parameters are problematic
+            forecast_q = arps_hyperbolic(forecast_t, qi_original, Di, b)
+            print(f"Using original parameters without adjustment: qi={qi_original:.2f}, Di={Di:.4f}, b={b:.2f}")
+    else:
+        # Use original fitted parameters with no adjustment
+        forecast_q = arps_hyperbolic(forecast_t, *popt)
+        qi_original, Di, b = popt
+        print(f"Using fitted model parameters: qi={qi_original:.2f}, Di={Di:.4f}, b={b:.2f}")
     
     ax.plot(df_full['Prod_Date'], q_original, 'o', color='red', 
              label='Original Data', alpha=0.6, markersize=5)
@@ -530,7 +563,27 @@ class DeclineCurveApp(tk.Tk):
         
         try:
             self.df_all = pd.read_csv('OFM202409.csv', low_memory=False)
-            self.wells = sorted(self.df_all['Well_Name'].unique())
+            
+            # Get unique districts and fields
+            self.districts = sorted([d for d in self.df_all['District'].dropna().unique() if str(d).strip()])
+            self.fields_by_district = {}
+            self.wells_by_field = {}
+            
+            # Build hierarchical structure
+            for district in self.districts:
+                district_data = self.df_all[self.df_all['District'] == district]
+                fields = sorted([f for f in district_data['Field'].dropna().unique() if str(f).strip()])
+                self.fields_by_district[district] = fields
+                
+                for field in fields:
+                    field_data = district_data[district_data['Field'] == field]
+                    wells = sorted([w for w in field_data['Well_Name'].dropna().unique() if str(w).strip()])
+                    self.wells_by_field[f"{district}|{field}"] = wells
+            
+            # Set default selections (first alphabetically)
+            self.current_district = self.districts[0] if self.districts else None
+            self.current_field = self.fields_by_district.get(self.current_district, [None])[0] if self.current_district else None
+            
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load data: {str(e)}")
             self.destroy()
@@ -542,9 +595,29 @@ class DeclineCurveApp(tk.Tk):
         self.main_frame = ttk.Frame(self)
         self.main_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
+        # District dropdown
+        ttk.Label(self.left_frame, text="Select District:").pack(anchor=tk.W, pady=5)
+        self.district_var = tk.StringVar(value=self.current_district if self.current_district else "")
+        self.district_combo = ttk.Combobox(self.left_frame, textvariable=self.district_var, 
+                                          values=self.districts, state='readonly')
+        self.district_combo.pack(fill=tk.X, pady=5)
+        self.district_combo.bind('<<ComboboxSelected>>', self.on_district_select)
+        
+        # Field dropdown
+        ttk.Label(self.left_frame, text="Select Field:").pack(anchor=tk.W, pady=5)
+        self.field_var = tk.StringVar(value=self.current_field if self.current_field else "")
+        initial_fields = self.fields_by_district.get(self.current_district, []) if self.current_district else []
+        self.field_combo = ttk.Combobox(self.left_frame, textvariable=self.field_var, 
+                                       values=initial_fields, state='readonly')
+        self.field_combo.pack(fill=tk.X, pady=5)
+        self.field_combo.bind('<<ComboboxSelected>>', self.on_field_select)
+        
+        # Well dropdown
         ttk.Label(self.left_frame, text="Select Well:").pack(anchor=tk.W, pady=5)
         self.well_var = tk.StringVar()
-        self.well_combo = ttk.Combobox(self.left_frame, textvariable=self.well_var, values=self.wells, state='readonly')
+        initial_wells = self.wells_by_field.get(f"{self.current_district}|{self.current_field}", []) if self.current_district and self.current_field else []
+        self.well_combo = ttk.Combobox(self.left_frame, textvariable=self.well_var, 
+                                      values=initial_wells, state='readonly')
         self.well_combo.pack(fill=tk.X, pady=5)
         self.well_combo.bind('<<ComboboxSelected>>', self.on_well_select)
         
@@ -771,6 +844,35 @@ class DeclineCurveApp(tk.Tk):
         ttk.Button(button_frame, text="Save", command=save_ranges).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Reset to Default", command=reset_ranges).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=config_window.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def on_district_select(self, event):
+        """Update field dropdown when district is selected"""
+        district = self.district_var.get()
+        if district:
+            self.current_district = district
+            fields = self.fields_by_district.get(district, [])
+            self.field_combo['values'] = fields
+            if fields:
+                self.field_var.set(fields[0])  # Set first field as default
+                self.current_field = fields[0]
+                self.on_field_select(None)
+            else:
+                self.field_var.set("")
+                self.well_combo['values'] = []
+                self.well_var.set("")
+    
+    def on_field_select(self, event):
+        """Update well dropdown when field is selected"""
+        district = self.district_var.get()
+        field = self.field_var.get()
+        if district and field:
+            self.current_field = field
+            wells = self.wells_by_field.get(f"{district}|{field}", [])
+            self.well_combo['values'] = wells
+            if wells:
+                self.well_var.set(wells[0])  # Set first well as default
+            else:
+                self.well_var.set("")
     
     def on_well_select(self, event):
         pass
