@@ -1,3 +1,4 @@
+
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
@@ -168,6 +169,16 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
         print(f"Applied vertical shift of {rate_difference:.2f} bbl/day to match last historical rate")
     print(f"Forecast parameters: qi={qi_original:.2f}, Di={Di:.4f}, b={b:.2f}")
     decline_start_idx = len(q_original) - len(q)
+    
+    # Create continuous date range for smooth model curve
+    first_date = df_well['Prod_Date'].min()
+    last_historical_date = df_well['Prod_Date'].max()
+    all_dates = pd.date_range(start=first_date, end=last_historical_date, freq='MS')
+    
+    # Create continuous time array for model prediction
+    t_continuous = np.array([(d - first_date).days // 30 for d in all_dates])
+    q_pred_continuous = arps_hyperbolic(t_continuous, *popt)
+    
     if show_pre_decline and decline_start_idx > 0:
         ax.plot(df_full['Prod_Date'].iloc[:decline_start_idx], 
                 q_original[:decline_start_idx], 'o', color='red', 
@@ -185,11 +196,17 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
     if show_outliers and np.sum(~mask) > 0:
         ax.plot(df_well['Prod_Date'][~mask], q[~mask], 'x', color='red', 
                 label='Outliers (Excluded)', markersize=10, markeredgewidth=2)
-    if show_channel:
-        ax.fill_between(df_well['Prod_Date'][mask], lower_bound[mask], upper_bound[mask],
-                        color='green', alpha=0.2, label=f'±{channel_width:.1f} bbl/day Channel')
-    ax.plot(df_well['Prod_Date'][mask], q_pred[mask], '-', color='green', 
+    
+    # Plot continuous model curve for all months
+    ax.plot(all_dates, q_pred_continuous, '-', color='green', 
             label='Arps Hyperbolic Model', linewidth=2)
+    
+    if show_channel:
+        # Create continuous channel bounds
+        upper_bound_continuous = q_pred_continuous + channel_width
+        lower_bound_continuous = np.maximum(q_pred_continuous - channel_width, 0)
+        ax.fill_between(all_dates, lower_bound_continuous, upper_bound_continuous,
+                        color='green', alpha=0.2, label=f'±{channel_width:.1f} bbl/day Channel')
     if show_forecast:
         forecast_years = forecast_duration / 12
         if forecast_years in list(range(1, 31)):
@@ -618,76 +635,141 @@ class DeclineCurveApp(tk.Tk):
             self.df_all = pd.read_csv('OFM202409.csv', low_memory=False)
             self.districts = sorted([d for d in self.df_all['District'].dropna().unique() if str(d).strip()])
             self.fields_by_district = {}
-            self.wells_by_field = {}
+            self.formations_by_field = {}
+            self.wells_by_formation = {}
             for district in self.districts:
                 district_data = self.df_all[self.df_all['District'] == district]
                 fields = sorted([f for f in district_data['Field'].dropna().unique() if str(f).strip()])
                 self.fields_by_district[district] = fields
                 for field in fields:
                     field_data = district_data[district_data['Field'] == field]
-                    wells = sorted([w for w in field_data['Well_Name'].dropna().unique() if str(w).strip()])
-                    self.wells_by_field[f"{district}|{field}"] = wells
+                    formations = sorted([fm for fm in field_data['Alias_Formation'].dropna().unique() if str(fm).strip()])
+                    self.formations_by_field[f"{district}|{field}"] = formations
+                    for formation in formations:
+                        formation_data = field_data[field_data['Alias_Formation'] == formation]
+                        wells = sorted([w for w in formation_data['Well_Name'].dropna().unique() if str(w).strip()])
+                        self.wells_by_formation[f"{district}|{field}|{formation}"] = wells
             self.current_district = self.districts[0] if self.districts else None
             self.current_field = self.fields_by_district.get(self.current_district, [None])[0] if self.current_district else None
+            self.current_formation = None
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load data: {str(e)}")
             self.destroy()
             return
 
-        self.left_frame = ttk.Frame(self, width=420, padding=10)
-        self.left_frame.pack(side=tk.LEFT, fill=tk.Y)
-        self.left_frame.pack_propagate(False)
+        # Create main container frame
         self.main_frame = ttk.Frame(self)
-        self.main_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        ttk.Label(self.left_frame, text="Select District:").pack(anchor=tk.W, pady=5)
+        self.main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        # Top frame for field/reservoir/well selection
+        self.top_frame = ttk.Frame(self.main_frame, padding=10)
+        self.top_frame.pack(side=tk.TOP, fill=tk.X)
+        
+        # District, Field, Formation, and Well Selection in the top frame
+        selection_frame = ttk.Frame(self.top_frame)
+        selection_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(selection_frame, text="District:").grid(row=0, column=0, sticky=tk.W, padx=5)
         self.district_var = tk.StringVar(value=self.current_district if self.current_district else "")
-        self.district_combo = ttk.Combobox(self.left_frame, textvariable=self.district_var, 
-                                          values=self.districts, state='readonly')
-        self.district_combo.pack(fill=tk.X, pady=5)
+        self.district_combo = ttk.Combobox(selection_frame, textvariable=self.district_var, 
+                                          values=self.districts, state='readonly', width=25)
+        self.district_combo.grid(row=0, column=1, sticky=tk.EW, padx=5)
         self.district_combo.bind('<<ComboboxSelected>>', self.on_district_select)
 
-        ttk.Label(self.left_frame, text="Select Field:").pack(anchor=tk.W, pady=5)
+        ttk.Label(selection_frame, text="Field:").grid(row=0, column=2, sticky=tk.W, padx=5)
         self.field_var = tk.StringVar(value=self.current_field if self.current_field else "")
         initial_fields = self.fields_by_district.get(self.current_district, []) if self.current_district else []
-        self.field_combo = ttk.Combobox(self.left_frame, textvariable=self.field_var, 
-                                       values=initial_fields, state='readonly')
-        self.field_combo.pack(fill=tk.X, pady=5)
+        self.field_combo = ttk.Combobox(selection_frame, textvariable=self.field_var, 
+                                       values=initial_fields, state='readonly', width=25)
+        self.field_combo.grid(row=0, column=3, sticky=tk.EW, padx=5)
         self.field_combo.bind('<<ComboboxSelected>>', self.on_field_select)
 
-        ttk.Label(self.left_frame, text="Select Well:").pack(anchor=tk.W, pady=5)
+        ttk.Label(selection_frame, text="Formation:").grid(row=0, column=4, sticky=tk.W, padx=5)
+        self.formation_var = tk.StringVar()
+        initial_formations = self.formations_by_field.get(f"{self.current_district}|{self.current_field}", []) if self.current_district and self.current_field else []
+        self.formation_combo = ttk.Combobox(selection_frame, textvariable=self.formation_var, 
+                                           values=initial_formations, state='readonly', width=25)
+        self.formation_combo.grid(row=0, column=5, sticky=tk.EW, padx=5)
+        self.formation_combo.bind('<<ComboboxSelected>>', self.on_formation_select)
+
+        ttk.Label(selection_frame, text="Well:").grid(row=0, column=6, sticky=tk.W, padx=5)
         self.well_var = tk.StringVar()
-        initial_wells = self.wells_by_field.get(f"{self.current_district}|{self.current_field}", []) if self.current_district and self.current_field else []
-        self.well_combo = ttk.Combobox(self.left_frame, textvariable=self.well_var, 
-                                      values=initial_wells, state='readonly')
-        self.well_combo.pack(fill=tk.X, pady=5)
+        initial_wells = []
+        self.well_combo = ttk.Combobox(selection_frame, textvariable=self.well_var, 
+                                      values=initial_wells, state='readonly', width=25)
+        self.well_combo.grid(row=0, column=7, sticky=tk.EW, padx=5)
+        self.well_combo.bind('<<ComboboxSelected>>', self.on_well_select)
+        
+        selection_frame.columnconfigure(1, weight=1)
+        selection_frame.columnconfigure(3, weight=1)
+        selection_frame.columnconfigure(5, weight=1)
+        selection_frame.columnconfigure(7, weight=1)
+        
+        # Bottom container for chart and controls
+        self.bottom_container = ttk.Frame(self.main_frame)
+        self.bottom_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        # Left frame for controls
+        self.left_frame = ttk.Frame(self.bottom_container, width=420, padding=10)
+        self.left_frame.pack(side=tk.LEFT, fill=tk.Y)
+        self.left_frame.pack_propagate(False)
+        
+        # Chart frame
+        self.canvas_frame = ttk.Frame(self.bottom_container)
+        self.canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         ttk.Label(self.left_frame, text="Start Date Selection Method:").pack(anchor=tk.W, pady=5)
         self.start_method_var = tk.StringVar(value="Auto Select")
-        methods = ["Auto Select", "Manual Start Date", "Manual Start Date & Initial Rate (Qi)"]
-        for m in methods:
-            ttk.Radiobutton(self.left_frame, text=m, variable=self.start_method_var, value=m).pack(anchor=tk.W)
+        ttk.Radiobutton(self.left_frame, text="Auto Select", variable=self.start_method_var, value="Auto Select").pack(anchor=tk.W)
 
-        self.manual_date_frame = ttk.Frame(self.left_frame)
-        self.manual_date_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(self.manual_date_frame, text="Manual Start Year:").pack(side=tk.LEFT)
+        # Professional frame for Manual Start Date
+        self.manual_frame = ttk.LabelFrame(self.left_frame, text="Manual Start Date", padding=10, relief="groove", borderwidth=2)
+        self.manual_frame.pack(fill=tk.X, pady=10, padx=5)
+        
+        ttk.Radiobutton(self.manual_frame, text="Manual Start Date", variable=self.start_method_var, 
+                       value="Manual Start Date").pack(anchor=tk.W)
+        
+        manual_date_frame = ttk.Frame(self.manual_frame)
+        manual_date_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(manual_date_frame, text="Year:").pack(side=tk.LEFT)
         self.manual_year_var = tk.IntVar(value=2020)
-        ttk.Entry(self.manual_date_frame, textvariable=self.manual_year_var, width=5).pack(side=tk.LEFT, padx=5)
-        ttk.Label(self.manual_date_frame, text="Month:").pack(side=tk.LEFT)
+        ttk.Entry(manual_date_frame, textvariable=self.manual_year_var, width=5).pack(side=tk.LEFT, padx=5)
+        ttk.Label(manual_date_frame, text="Month:").pack(side=tk.LEFT)
         self.manual_month_var = tk.IntVar(value=1)
-        ttk.Entry(self.manual_date_frame, textvariable=self.manual_month_var, width=3).pack(side=tk.LEFT, padx=5)
-
-        # Buttons next to the label
-        self.start_label_frame = ttk.Frame(self.left_frame)
-        self.start_label_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(self.start_label_frame, text="Select Start Date on Chart:").pack(side=tk.LEFT)
-        self.select_start_btn = ttk.Button(self.start_label_frame, text="Select", command=self.enable_chart_click_selection)
+        ttk.Entry(manual_date_frame, textvariable=self.manual_month_var, width=3).pack(side=tk.LEFT, padx=5)
+        
+        start_button_frame = ttk.Frame(self.manual_frame)
+        start_button_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(start_button_frame, text="Select Start Date on Chart:").pack(side=tk.LEFT)
+        self.select_start_btn = ttk.Button(start_button_frame, text="Select", command=self.enable_chart_click_selection)
         self.select_start_btn.pack(side=tk.LEFT, padx=5)
 
-        self.qi_label_frame = ttk.Frame(self.left_frame)
-        self.qi_label_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(self.qi_label_frame, text="Select Start Date & Qi on Chart:").pack(side=tk.LEFT)
-        self.select_qi_btn = ttk.Button(self.qi_label_frame, text="Select", command=self.enable_qi_click_selection)
+        # Professional frame for Manual Start Date & Initial Rate (Qi)
+        self.qi_frame = ttk.LabelFrame(self.left_frame, text="Manual Start Date & Initial Rate (Qi)", padding=10, relief="groove", borderwidth=2)
+        self.qi_frame.pack(fill=tk.X, pady=10, padx=5)
+        
+        ttk.Radiobutton(self.qi_frame, text="Manual Start Date & Initial Rate (Qi)", variable=self.start_method_var, 
+                       value="Manual Start Date & Initial Rate (Qi)").pack(anchor=tk.W)
+        
+        qi_date_frame = ttk.Frame(self.qi_frame)
+        qi_date_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(qi_date_frame, text="Year:").pack(side=tk.LEFT)
+        self.qi_year_var = tk.IntVar(value=2020)
+        ttk.Entry(qi_date_frame, textvariable=self.qi_year_var, width=5).pack(side=tk.LEFT, padx=5)
+        ttk.Label(qi_date_frame, text="Month:").pack(side=tk.LEFT)
+        self.qi_month_var = tk.IntVar(value=1)
+        ttk.Entry(qi_date_frame, textvariable=self.qi_month_var, width=3).pack(side=tk.LEFT, padx=5)
+        
+        qi_rate_frame = ttk.Frame(self.qi_frame)
+        qi_rate_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(qi_rate_frame, text="Initial Rate (Qi) bbl/day:").pack(side=tk.LEFT)
+        self.qi_value_var = tk.StringVar(value="")
+        ttk.Entry(qi_rate_frame, textvariable=self.qi_value_var, width=10).pack(side=tk.LEFT, padx=5)
+        
+        qi_button_frame = ttk.Frame(self.qi_frame)
+        qi_button_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(qi_button_frame, text="Select Start Date & Qi on Chart:").pack(side=tk.LEFT)
+        self.select_qi_btn = ttk.Button(qi_button_frame, text="Select", command=self.enable_qi_click_selection)
         self.select_qi_btn.pack(side=tk.LEFT, padx=5)
 
         self.optimize_var = tk.BooleanVar(value=True)
@@ -701,14 +783,18 @@ class DeclineCurveApp(tk.Tk):
         self.create_period_tab()
         self.create_plot_options_tab()
 
-        self.run_btn = ttk.Button(self.left_frame, text="Run Analysis", command=self.run_analysis)
-        self.run_btn.pack(pady=10)
+        # Button frame for Run Analysis and Reset
+        button_frame = ttk.Frame(self.left_frame)
+        button_frame.pack(pady=10, fill=tk.X)
+        
+        self.run_btn = ttk.Button(button_frame, text="Run Analysis", command=self.run_analysis)
+        self.run_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        
+        self.reset_btn = ttk.Button(button_frame, text="Reset", command=self.reset_parameters)
+        self.reset_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
         self.results_text = tk.Text(self.left_frame, height=10, wrap=tk.WORD)
         self.results_text.pack(fill=tk.X, pady=5)
-
-        self.canvas_frame = ttk.Frame(self.main_frame)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True)
 
         self.figure = None
         self.canvas = None
@@ -736,7 +822,6 @@ class DeclineCurveApp(tk.Tk):
         if self.qi_click_cid:
             self.figure.canvas.mpl_disconnect(self.qi_click_cid)
         self.click_cid = self.figure.canvas.mpl_connect('button_press_event', self.on_chart_click)
-        messagebox.showinfo("Info", "Click on the chart to select a start date.")
 
     def on_chart_click(self, event):
         if not self.click_selection_enabled or event.inaxes is None:
@@ -760,7 +845,6 @@ class DeclineCurveApp(tk.Tk):
         self.manual_year_var.set(selected_date.year)
         self.manual_month_var.set(selected_date.month)
         self.start_method_var.set("Manual Start Date")
-        messagebox.showinfo("Selected", f"Start date set to: {selected_date.date()}")
         self.click_selection_enabled = False
         if self.click_cid:
             self.figure.canvas.mpl_disconnect(self.click_cid)
@@ -777,7 +861,6 @@ class DeclineCurveApp(tk.Tk):
         if self.qi_click_cid:
             self.figure.canvas.mpl_disconnect(self.qi_click_cid)
         self.qi_click_cid = self.figure.canvas.mpl_connect('button_press_event', self.on_qi_chart_click)
-        messagebox.showinfo("Info", "Click on the chart to select a start date AND initial rate (Qi).")
 
     def on_qi_chart_click(self, event):
         if not self.qi_selection_enabled or event.inaxes is None:
@@ -800,11 +883,11 @@ class DeclineCurveApp(tk.Tk):
         elif idx < 0:
             idx = 0
         selected_date = df_well.iloc[idx]['Prod_Date']
-        self.manual_year_var.set(selected_date.year)
-        self.manual_month_var.set(selected_date.month)
+        self.qi_year_var.set(selected_date.year)
+        self.qi_month_var.set(selected_date.month)
         self.fixed_qi = float(clicked_rate)
+        self.qi_value_var.set(f"{clicked_rate:.2f}")
         self.start_method_var.set("Manual Start Date & Initial Rate (Qi)")
-        messagebox.showinfo("Selected", f"Start date set to: {selected_date.date()}\nInitial rate (Qi) fixed to: {clicked_rate:.2f} bbl/day")
         self.qi_selection_enabled = False
         if self.qi_click_cid:
             self.figure.canvas.mpl_disconnect(self.qi_click_cid)
@@ -1044,6 +1127,8 @@ class DeclineCurveApp(tk.Tk):
                 self.on_field_select(None)
             else:
                 self.field_var.set("")
+                self.formation_combo['values'] = []
+                self.formation_var.set("")
                 self.well_combo['values'] = []
                 self.well_var.set("")
 
@@ -1052,12 +1137,140 @@ class DeclineCurveApp(tk.Tk):
         field = self.field_var.get()
         if district and field:
             self.current_field = field
-            wells = self.wells_by_field.get(f"{district}|{field}", [])
+            formations = self.formations_by_field.get(f"{district}|{field}", [])
+            self.formation_combo['values'] = formations
+            if formations:
+                self.formation_var.set(formations[0])
+                self.current_formation = formations[0]
+                self.on_formation_select(None)
+            else:
+                self.formation_var.set("")
+                self.well_combo['values'] = []
+                self.well_var.set("")
+
+    def on_formation_select(self, event):
+        district = self.district_var.get()
+        field = self.field_var.get()
+        formation = self.formation_var.get()
+        if district and field and formation:
+            self.current_formation = formation
+            wells = self.wells_by_formation.get(f"{district}|{field}|{formation}", [])
             self.well_combo['values'] = wells
             if wells:
                 self.well_var.set(wells[0])
             else:
                 self.well_var.set("")
+    
+    def on_well_select(self, event):
+        """Reset parameters when well selection changes"""
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Reset all parameters to defaults except district/field/formation/well filters"""
+        # Reset start method to Auto Select
+        self.start_method_var.set("Auto Select")
+        
+        # Reset general parameters to defaults
+        self.threshold_var.set(2.0)
+        self.threshold_opt_var.set(True)
+        self.forecast_avg_points_var.set(0)
+        self.forecast_duration_var.set(60)
+        self.forecast_offset_var.set(0)
+        
+        # Reset decline detection parameters to defaults
+        self.smooth_window_var.set(13)
+        self.smooth_window_opt_var.set(True)
+        self.polyorder_var.set(2)
+        self.polyorder_opt_var.set(True)
+        self.peak_prominence_var.set(0.15)
+        self.peak_prominence_opt_var.set(True)
+        self.post_ma_var.set(12)
+        self.post_ma_opt_var.set(True)
+        self.decline_frac_var.set(0.15)
+        self.decline_frac_opt_var.set(True)
+        self.post_slope_win_var.set(12)
+        self.post_slope_win_opt_var.set(True)
+        self.persist_months_var.set(9)
+        self.persist_months_opt_var.set(True)
+        
+        # Reset period detection parameters to defaults
+        self.min_production_months_var.set(12)
+        self.min_production_months_opt_var.set(True)
+        self.surge_multiplier_var.set(2.0)
+        self.surge_multiplier_opt_var.set(True)
+        self.gap_threshold_var.set(0.3)
+        self.gap_threshold_opt_var.set(True)
+        self.lookback_window_var.set(6)
+        self.lookback_window_opt_var.set(True)
+        
+        # Reset plot options - show outliers, forecast, and pre-decline by default
+        self.show_outliers_var.set(True)
+        self.show_pre_decline_var.set(True)
+        self.show_forecast_var.set(True)
+        self.show_smoothed_var.set(False)
+        self.show_channel_var.set(False)
+        
+        # Reset optimization checkbox
+        self.optimize_var.set(True)
+        
+        # Reset manual date inputs
+        self.manual_year_var.set(2020)
+        self.manual_month_var.set(1)
+        self.qi_year_var.set(2020)
+        self.qi_month_var.set(1)
+        self.qi_value_var.set("")
+        
+        # Reset fixed_qi
+        self.fixed_qi = None
+        
+        # Clear results text
+        self.results_text.delete(1.0, tk.END)
+        
+        # Display raw data if well is selected
+        well_name = self.well_var.get()
+        if well_name:
+            self.display_raw_data(well_name)
+    
+    def display_raw_data(self, well_name):
+        """Display only raw production data points in black without any analysis"""
+        df_well = self.df_all[self.df_all['Well_Name'] == well_name].copy()
+        if df_well.empty:
+            return
+        
+        df_well = df_well.sort_values('Prod_Date')
+        df_well['Prod_Date'] = pd.to_datetime(df_well['Prod_Date'])
+        df_well['days_in_month'] = df_well['Prod_Date'].apply(get_days_in_month)
+        df_well['oil_prod_daily'] = df_well['M_Oil_Prod'] / df_well['days_in_month']
+        
+        # Create simple plot with only raw data
+        fig, ax = plt.subplots(figsize=(12, 7))
+        ax.plot(df_well['Prod_Date'], df_well['oil_prod_daily'], 'o', color='black', 
+                label='Production Data', markersize=6)
+        
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Oil Production Rate (bbl/day)')
+        ax.set_title(f'Well {well_name}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(bottom=0)
+        
+        # Display the plot
+        if self.canvas:
+            self.canvas.get_tk_widget().destroy()
+        if self.toolbar:
+            self.toolbar.destroy()
+        
+        self.figure = fig
+        self.canvas = FigureCanvasTkAgg(fig, master=self.canvas_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.canvas_frame)
+        self.toolbar.update()
+        self.toolbar.pack(fill=tk.X)
+        
+        # Clear analysis params since this is just raw data
+        self.current_well_name = None
+        self.current_analysis_params = None
 
     def run_analysis(self):
         well_name = self.well_var.get()
@@ -1077,8 +1290,23 @@ class DeclineCurveApp(tk.Tk):
 
         if start_method in ["Manual Start Date", "Manual Start Date & Initial Rate (Qi)"]:
             try:
-                year = self.manual_year_var.get()
-                month = self.manual_month_var.get()
+                if start_method == "Manual Start Date":
+                    year = self.manual_year_var.get()
+                    month = self.manual_month_var.get()
+                else:
+                    year = self.qi_year_var.get()
+                    month = self.qi_month_var.get()
+                    # Read Qi value from entry field
+                    qi_str = self.qi_value_var.get().strip()
+                    if qi_str:
+                        try:
+                            self.fixed_qi = float(qi_str)
+                        except ValueError:
+                            messagebox.showerror("Error", f"Invalid Initial Rate (Qi) value: {qi_str}")
+                            return
+                    else:
+                        messagebox.showwarning("Warning", "Please enter an Initial Rate (Qi) value or click on the chart to select one.")
+                        return
                 manual_date = pd.to_datetime(f"{year}-{month:02d}-01")
                 manual_start_idx = np.searchsorted(df_well_sorted['Prod_Date'], manual_date)
                 if manual_start_idx >= len(df_well_sorted):
@@ -1257,7 +1485,6 @@ class DeclineCurveApp(tk.Tk):
                     forecast_offset=forecast_offset,
                     fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None
                 )
-                results += f"\nOptimization Results:\nOptimized parameters: {optimized_params}\nBest score: {best_score:.2f}"
             else:
                 fig, results = run_arps_for_well_auto(
                     self.df_all, well_name, outlier_threshold=outlier_threshold,
@@ -1271,7 +1498,6 @@ class DeclineCurveApp(tk.Tk):
                     forecast_offset=forecast_offset,
                     fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None
                 )
-                results += "\nNo parameters optimized (all optimization checkboxes unchecked)."
         else:
             if start_method == "Auto Select":
                 auto_idx = find_last_production_period(df_well_sorted, **period_params)
@@ -1314,7 +1540,6 @@ class DeclineCurveApp(tk.Tk):
                     forecast_offset=forecast_offset,
                     fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None
                 )
-            results += "\nOptimization disabled."
 
         self.results_text.delete(1.0, tk.END)
         self.results_text.insert(tk.END, results)
