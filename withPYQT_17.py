@@ -824,6 +824,7 @@ class DeclineCurveApp(QMainWindow):
         self.start_method_buttons = QButtonGroup()
         self.auto_select_radio = QRadioButton("Auto Select")
         self.auto_select_radio.setChecked(True)
+        self.auto_select_radio.toggled.connect(lambda checked: self.update_vertical_line_from_inputs() if checked else None)
         self.start_method_buttons.addButton(self.auto_select_radio, 0)
         start_method_layout.addWidget(self.auto_select_radio)
 
@@ -833,6 +834,7 @@ class DeclineCurveApp(QMainWindow):
         self.manual_frame.setLayout(manual_layout)
         
         self.manual_start_radio = QRadioButton("Manual Start Date")
+        self.manual_start_radio.toggled.connect(lambda checked: self.update_vertical_line_from_inputs() if checked else None)
         self.start_method_buttons.addButton(self.manual_start_radio, 1)
         manual_layout.addWidget(self.manual_start_radio)
         
@@ -840,10 +842,12 @@ class DeclineCurveApp(QMainWindow):
         manual_date_layout.addWidget(QLabel("Year:"))
         self.manual_year_edit = QLineEdit("2020")
         self.manual_year_edit.setMaximumWidth(60)
+        self.manual_year_edit.textChanged.connect(self.update_vertical_line_from_inputs)
         manual_date_layout.addWidget(self.manual_year_edit)
         manual_date_layout.addWidget(QLabel("Month:"))
         self.manual_month_edit = QLineEdit("1")
         self.manual_month_edit.setMaximumWidth(40)
+        self.manual_month_edit.textChanged.connect(self.update_vertical_line_from_inputs)
         manual_date_layout.addWidget(self.manual_month_edit)
         self.select_start_btn = QPushButton("Select on Chart")
         self.select_start_btn.clicked.connect(self.enable_chart_click_selection)
@@ -859,6 +863,7 @@ class DeclineCurveApp(QMainWindow):
         self.qi_frame.setLayout(qi_layout)
         
         self.qi_radio = QRadioButton("Manual Start Date & Initial Rate (Qi)")
+        self.qi_radio.toggled.connect(lambda checked: self.update_vertical_line_from_inputs() if checked else None)
         self.start_method_buttons.addButton(self.qi_radio, 2)
         qi_layout.addWidget(self.qi_radio)
         
@@ -866,10 +871,12 @@ class DeclineCurveApp(QMainWindow):
         qi_date_layout.addWidget(QLabel("Year:"))
         self.qi_year_edit = QLineEdit("2020")
         self.qi_year_edit.setMaximumWidth(60)
+        self.qi_year_edit.textChanged.connect(self.update_vertical_line_from_inputs)
         qi_date_layout.addWidget(self.qi_year_edit)
         qi_date_layout.addWidget(QLabel("Month:"))
         self.qi_month_edit = QLineEdit("1")
         self.qi_month_edit.setMaximumWidth(40)
+        self.qi_month_edit.textChanged.connect(self.update_vertical_line_from_inputs)
         qi_date_layout.addWidget(self.qi_month_edit)
         qi_date_layout.addStretch()
         qi_layout.addLayout(qi_date_layout)
@@ -959,6 +966,7 @@ class DeclineCurveApp(QMainWindow):
         self.fixed_qi = None
         self.original_cursor = None
         self.event_filter_installed = False
+        self.vertical_line = None  # Store reference to vertical line on chart
         
         # Initialization complete, enable well selection reset behavior
         self.initializing = False
@@ -970,6 +978,52 @@ class DeclineCurveApp(QMainWindow):
 
     def closeEvent(self, event):
         event.accept()
+    
+    def remove_vertical_line(self):
+        """Remove the vertical line from the chart if it exists"""
+        if self.vertical_line is not None and self.figure is not None:
+            try:
+                self.vertical_line.remove()
+                self.canvas.draw()
+            except:
+                pass  # Line may have already been removed
+            self.vertical_line = None
+    
+    def update_vertical_line_from_inputs(self):
+        """Add or update vertical line based on current manual date inputs"""
+        if self.figure is None or self.canvas is None:
+            return
+        
+        # Only show vertical line if in manual mode
+        if self.auto_select_radio.isChecked():
+            self.remove_vertical_line()
+            return
+        
+        try:
+            # Get the appropriate year and month based on which manual mode is selected
+            if self.manual_start_radio.isChecked():
+                year = int(self.manual_year_edit.text())
+                month = int(self.manual_month_edit.text())
+            elif self.qi_radio.isChecked():
+                year = int(self.qi_year_edit.text())
+                month = int(self.qi_month_edit.text())
+            else:
+                return
+            
+            # Create the date from inputs
+            selected_date = pd.to_datetime(f"{year}-{month:02d}-01")
+            
+            # Remove existing line
+            self.remove_vertical_line()
+            
+            # Add new vertical line at the selected date
+            ax = self.figure.axes[0]
+            self.vertical_line = ax.axvline(x=selected_date, color='red', linestyle='--', linewidth=2, label='Selected Start Date')
+            ax.legend()
+            self.canvas.draw()
+        except (ValueError, AttributeError):
+            # Invalid date input, don't draw line
+            pass
     
     def eventFilter(self, obj, event):
         """Event filter to catch ESC key press globally"""
@@ -1031,6 +1085,16 @@ class DeclineCurveApp(QMainWindow):
         self.manual_year_edit.setText(str(selected_date.year))
         self.manual_month_edit.setText(str(selected_date.month))
         self.manual_start_radio.setChecked(True)
+        
+        # Remove any existing vertical line
+        self.remove_vertical_line()
+        
+        # Add a vertical line at the selected date
+        ax = self.figure.axes[0]
+        self.vertical_line = ax.axvline(x=selected_date, color='red', linestyle='--', linewidth=2, label='Selected Start Date')
+        ax.legend()
+        self.canvas.draw()
+        
         self.disable_selection_mode()
 
     def enable_qi_click_selection(self):
@@ -1088,6 +1152,16 @@ class DeclineCurveApp(QMainWindow):
         self.fixed_qi = float(clicked_rate)
         self.qi_value_edit.setText(f"{clicked_rate:.2f}")
         self.qi_radio.setChecked(True)
+        
+        # Remove any existing vertical line
+        self.remove_vertical_line()
+        
+        # Add a vertical line at the selected date
+        ax = self.figure.axes[0]
+        self.vertical_line = ax.axvline(x=selected_date, color='red', linestyle='--', linewidth=2, label='Selected Start Date')
+        ax.legend()
+        self.canvas.draw()
+        
         self.disable_selection_mode()
     
     def on_key_press(self, event):
@@ -1465,6 +1539,9 @@ class DeclineCurveApp(QMainWindow):
                 
                 # Reset event filter flag for new canvas
                 self.event_filter_installed = False
+                
+                # Redraw vertical line if in manual mode
+                self.update_vertical_line_from_inputs()
         except Exception as e:
             print(f"Error updating plot options: {e}")
 
@@ -2049,6 +2126,9 @@ class DeclineCurveApp(QMainWindow):
                 'forecast_duration': forecast_duration,
                 'forecast_offset': forecast_offset
             }
+            
+            # Redraw vertical line if in manual mode
+            self.update_vertical_line_from_inputs()
         else:
             QMessageBox.critical(self, "Error", results)
 
