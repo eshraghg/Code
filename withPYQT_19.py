@@ -2,7 +2,8 @@
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QComboBox, QPushButton, QCheckBox, QLineEdit, QTextEdit,
                              QTabWidget, QGroupBox, QGridLayout, QRadioButton, QButtonGroup,
-                             QMessageBox, QSplitter, QFrame, QListWidget, QDialog, QDialogButtonBox)
+                             QMessageBox, QSplitter, QFrame, QListWidget, QDialog, QDialogButtonBox,
+                             QSizePolicy)
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent
 from PyQt6.QtGui import QFont, QPalette, QColor, QCursor
 import sys
@@ -879,50 +880,55 @@ class DeclineCurveApp(QMainWindow):
         
         # Left side: Well Selection frame
         selection_group = QGroupBox("Well Selection")
-        selection_layout = QHBoxLayout()
+        selection_layout = QGridLayout()
         selection_layout.setSpacing(6)
-        selection_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         selection_group.setLayout(selection_layout)
         
-        selection_layout.addWidget(QLabel("District:"))
+        # First column - District and Field
+        selection_layout.addWidget(QLabel("District:"), 0, 0)
         self.district_combo = QComboBox()
         self.district_combo.addItems(self.districts)
-        self.district_combo.setMinimumWidth(150)
+        self.district_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         if self.current_district:
             self.district_combo.setCurrentText(self.current_district)
         self.district_combo.currentTextChanged.connect(self.on_district_select)
-        selection_layout.addWidget(self.district_combo)
+        selection_layout.addWidget(self.district_combo, 0, 1)
 
-        selection_layout.addWidget(QLabel("Field:"))
+        selection_layout.addWidget(QLabel("Field:"), 1, 0)
         self.field_combo = QComboBox()
-        self.field_combo.setMinimumWidth(150)
+        self.field_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         initial_fields = self.fields_by_district.get(self.current_district, []) if self.current_district else []
         self.field_combo.addItems(initial_fields)
         if self.current_field:
             self.field_combo.setCurrentText(self.current_field)
         self.field_combo.currentTextChanged.connect(self.on_field_select)
-        selection_layout.addWidget(self.field_combo)
+        selection_layout.addWidget(self.field_combo, 1, 1)
 
-        selection_layout.addWidget(QLabel("Formation:"))
+        # Second column - Formation and Well
+        selection_layout.addWidget(QLabel("Formation:"), 0, 2)
         self.formation_combo = QComboBox()
-        self.formation_combo.setMinimumWidth(150)
+        self.formation_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         initial_formations = self.formations_by_field.get(f"{self.current_district}|{self.current_field}", []) if self.current_district and self.current_field else []
         self.formation_combo.addItems(initial_formations)
         self.formation_combo.currentTextChanged.connect(self.on_formation_select)
-        selection_layout.addWidget(self.formation_combo)
+        selection_layout.addWidget(self.formation_combo, 0, 3)
 
-        selection_layout.addWidget(QLabel("Well:"))
+        selection_layout.addWidget(QLabel("Well:"), 1, 2)
         self.well_combo = QComboBox()
-        self.well_combo.setMinimumWidth(150)
+        self.well_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.well_combo.currentTextChanged.connect(self.on_well_select)
-        selection_layout.addWidget(self.well_combo)
+        selection_layout.addWidget(self.well_combo, 1, 3)
+        
+        # Set column stretch factors to make combo boxes equally sized
+        selection_layout.setColumnStretch(1, 1)  # District/Field combo column
+        selection_layout.setColumnStretch(3, 1)  # Formation/Well combo column
         
         # Auto-select first items in each combo based on alphabetical order
         if initial_formations:
             self.formation_combo.setCurrentIndex(0)
             self.on_formation_select(initial_formations[0])
         
-        top_horizontal_layout.addWidget(selection_group)
+        top_horizontal_layout.addWidget(selection_group, 1)
         
         # Right side: Save/Load frame
         saveload_group = QGroupBox("Save / Load Analysis")
@@ -1039,7 +1045,7 @@ class DeclineCurveApp(QMainWindow):
         
         saveload_layout.addLayout(save_column)
         
-        top_horizontal_layout.addWidget(saveload_group)
+        top_horizontal_layout.addWidget(saveload_group, 1)
         
         # Bottom splitter for chart and controls
         splitter = QSplitter(Qt.Orientation.Horizontal)
