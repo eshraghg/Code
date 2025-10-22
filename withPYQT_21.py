@@ -1,10 +1,23 @@
+"""
+Decline Curve Analysis Tool
+
+This application provides hierarchical well selection using a tree structure with checkboxes.
+Users can select single or multiple wells, or aggregate data at formation, field, or district level.
+Production data is summed for aggregated selections.
+
+Key Features:
+- Tree-based hierarchical selection (District → Field → Formation → Well)
+- Multi-selection with checkboxes
+- Automatic aggregation via sum for multiple selections
+- Analysis on single or aggregated well data
+"""
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QComboBox, QPushButton, QCheckBox, QLineEdit, QTextEdit,
                              QTabWidget, QGroupBox, QGridLayout, QRadioButton, QButtonGroup,
                              QMessageBox, QSplitter, QFrame, QListWidget, QDialog, QDialogButtonBox,
-                             QSizePolicy)
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent
+                             QSizePolicy, QTreeWidget, QTreeWidgetItem, QStyleFactory)
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QTimer
 from PyQt6.QtGui import QFont, QPalette, QColor, QCursor
 import sys
 import pandas as pd
@@ -832,6 +845,22 @@ class DeclineCurveApp(QMainWindow):
                 background-color: #fdfefe;
                 padding: 4px;
             }
+            QTreeWidget {
+                border: 1px solid #bdc3c7;
+                border-radius: 4px;
+                background-color: white;
+                font-size: 11px;
+            }
+            QTreeWidget::item {
+                padding: 2px;
+            }
+            QTreeWidget::item:hover {
+                background-color: #ecf0f1;
+            }
+            QTreeWidget::item:selected {
+                background-color: #3498db;
+                color: white;
+            }
         """)
         self.filter_ranges = DEFAULT_FILTER_RANGES.copy()
         self.auto_start_ranges = DEFAULT_AUTO_START_RANGES.copy()
@@ -858,9 +887,6 @@ class DeclineCurveApp(QMainWindow):
                         formation_data = field_data[field_data['Alias_Formation'] == formation]
                         wells = sorted([w for w in formation_data['Well_Name'].dropna().unique() if str(w).strip()])
                         self.wells_by_formation[f"{district}|{field}|{formation}"] = wells
-            self.current_district = self.districts[0] if self.districts else None
-            self.current_field = self.fields_by_district.get(self.current_district, [None])[0] if self.current_district else None
-            self.current_formation = None
             self.initializing = True  # Flag to prevent reset during initialization
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
@@ -879,55 +905,78 @@ class DeclineCurveApp(QMainWindow):
         top_horizontal_layout.setSpacing(10)
         main_layout.addLayout(top_horizontal_layout)
         
-        # Left side: Well Selection frame
-        selection_group = QGroupBox("Well Selection")
-        selection_layout = QGridLayout()
+        # Left side: Well Selection frame with Tree
+        selection_group = QGroupBox("Well Selection (Select single or multiple wells, formations, fields, or districts)")
+        selection_layout = QVBoxLayout()
         selection_layout.setSpacing(6)
         selection_group.setLayout(selection_layout)
         
-        # First column - District and Field
-        selection_layout.addWidget(QLabel("District:"), 0, 0)
-        self.district_combo = QComboBox()
-        self.district_combo.addItems(self.districts)
-        self.district_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        if self.current_district:
-            self.district_combo.setCurrentText(self.current_district)
-        self.district_combo.currentTextChanged.connect(self.on_district_select)
-        selection_layout.addWidget(self.district_combo, 0, 1)
-
-        selection_layout.addWidget(QLabel("Field:"), 1, 0)
-        self.field_combo = QComboBox()
-        self.field_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        initial_fields = self.fields_by_district.get(self.current_district, []) if self.current_district else []
-        self.field_combo.addItems(initial_fields)
-        if self.current_field:
-            self.field_combo.setCurrentText(self.current_field)
-        self.field_combo.currentTextChanged.connect(self.on_field_select)
-        selection_layout.addWidget(self.field_combo, 1, 1)
-
-        # Second column - Formation and Well
-        selection_layout.addWidget(QLabel("Formation:"), 0, 2)
-        self.formation_combo = QComboBox()
-        self.formation_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        initial_formations = self.formations_by_field.get(f"{self.current_district}|{self.current_field}", []) if self.current_district and self.current_field else []
-        self.formation_combo.addItems(initial_formations)
-        self.formation_combo.currentTextChanged.connect(self.on_formation_select)
-        selection_layout.addWidget(self.formation_combo, 0, 3)
-
-        selection_layout.addWidget(QLabel("Well:"), 1, 2)
-        self.well_combo = QComboBox()
-        self.well_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.well_combo.currentTextChanged.connect(self.on_well_select)
-        selection_layout.addWidget(self.well_combo, 1, 3)
+        # Create tree widget with checkboxes
+        self.well_tree = QTreeWidget()
+        self.well_tree.setHeaderLabel("District → Field → Formation → Well")
+        # Ensure checkbox indicators remain visible when the tree loses focus
+        self.well_tree.setStyle(QStyleFactory.create("Fusion"))
+        self.well_tree.setMinimumHeight(200)
+        self.well_tree.setMaximumHeight(300)
+        self.well_tree.itemChanged.connect(self.on_tree_item_changed)
         
-        # Set column stretch factors to make combo boxes equally sized
-        selection_layout.setColumnStretch(1, 1)  # District/Field combo column
-        selection_layout.setColumnStretch(3, 1)  # Formation/Well combo column
+        # Populate the tree
+        self.populate_well_tree()
         
-        # Auto-select first items in each combo based on alphabetical order
-        if initial_formations:
-            self.formation_combo.setCurrentIndex(0)
-            self.on_formation_select(initial_formations[0])
+        selection_layout.addWidget(self.well_tree)
+        
+        # Add buttons and status label
+        buttons_layout = QHBoxLayout()
+        
+        self.apply_selection_btn = QPushButton("Apply")
+        self.apply_selection_btn.clicked.connect(self.apply_selection)
+        self.apply_selection_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                font-size: 11px;
+                padding: 6px 12px;
+                min-height: 26px;
+                max-height: 30px;
+            }
+            QPushButton:hover {
+                background-color: #229954;
+            }
+        """)
+        buttons_layout.addWidget(self.apply_selection_btn)
+        
+        self.clear_selection_btn = QPushButton("Clear Selection")
+        self.clear_selection_btn.clicked.connect(self.clear_selection)
+        self.clear_selection_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e67e22;
+                font-size: 11px;
+                padding: 6px 12px;
+                min-height: 26px;
+                max-height: 30px;
+            }
+            QPushButton:hover {
+                background-color: #d35400;
+            }
+        """)
+        buttons_layout.addWidget(self.clear_selection_btn)
+        
+        # Label to show current applied selection
+        self.applied_selection_label = QLabel("No selection applied")
+        self.applied_selection_label.setStyleSheet("""
+            QLabel {
+                color: #7f8c8d;
+                font-style: italic;
+                font-size: 10px;
+            }
+        """)
+        buttons_layout.addWidget(self.applied_selection_label, 1)
+        
+        selection_layout.addLayout(buttons_layout)
+        
+        # Store the currently applied selection
+        self.applied_wells = []
+        # Store aggregated data for chart click selection when multiple wells are selected
+        self.df_aggregated_cache = None
         
         top_horizontal_layout.addWidget(selection_group, 1)
         
@@ -1224,11 +1273,6 @@ class DeclineCurveApp(QMainWindow):
         
         # Initialization complete, enable well selection reset behavior
         self.initializing = False
-        
-        # Display raw data chart for the first well on startup
-        initial_well = self.well_combo.currentText()
-        if initial_well:
-            self.display_raw_data(initial_well)
 
     def get_well_hierarchy(self, well_name):
         """Get the district, field, and formation for a given well"""
@@ -1291,12 +1335,15 @@ class DeclineCurveApp(QMainWindow):
             return None
         
         # Get current GUI state
+        # Get hierarchy for the well
+        district, field, formation = self.get_well_hierarchy(well_name)
+        
         data = {
             'timestamp': datetime.now().isoformat(),
             'well_name': well_name,
-            'district': self.district_combo.currentText(),
-            'field': self.field_combo.currentText(),
-            'formation': self.formation_combo.currentText(),
+            'district': district if district else '',
+            'field': field if field else '',
+            'formation': formation if formation else '',
             
             # Start method
             'start_method': 'auto' if self.auto_select_radio.isChecked() else 
@@ -1349,9 +1396,9 @@ class DeclineCurveApp(QMainWindow):
     
     def save_current_well(self):
         """Save analysis for currently selected well"""
-        well_name = self.well_combo.currentText()
+        well_name = self.get_primary_well()
         if not well_name:
-            QMessageBox.warning(self, "Warning", "Please select a well")
+            QMessageBox.warning(self, "Warning", "Please select a well from the tree")
             return
         
         if not self.current_analysis_params or self.current_well_name != well_name:
@@ -1517,9 +1564,9 @@ class DeclineCurveApp(QMainWindow):
     
     def load_current_well(self):
         """Show dialog to select and load an analysis for current well"""
-        well_name = self.well_combo.currentText()
+        well_name = self.get_primary_well()
         if not well_name:
-            QMessageBox.warning(self, "Warning", "Please select a well")
+            QMessageBox.warning(self, "Warning", "Please select a well from the tree")
             return
         
         saved_files = self.get_saved_files_for_well(well_name)
@@ -1577,9 +1624,9 @@ class DeclineCurveApp(QMainWindow):
     
     def load_latest_current_well(self):
         """Load the most recent analysis for current well"""
-        well_name = self.well_combo.currentText()
+        well_name = self.get_primary_well()
         if not well_name:
-            QMessageBox.warning(self, "Warning", "Please select a well")
+            QMessageBox.warning(self, "Warning", "Please select a well from the tree")
             return
         
         saved_files = self.get_saved_files_for_well(well_name)
@@ -1614,7 +1661,7 @@ class DeclineCurveApp(QMainWindow):
         
         loaded_count = 0
         failed_wells = []
-        current_well_name = self.well_combo.currentText()
+        current_well_name = self.get_primary_well()
         current_well_data = None
         
         # Traverse the directory structure
@@ -1852,10 +1899,16 @@ class DeclineCurveApp(QMainWindow):
         if np.isnan(clicked_date):
             return
         date_clicked = pd.to_datetime(clicked_date, unit='D')
-        well_name = self.well_combo.currentText()
-        if not well_name:
-            return
-        df_well = self.df_all[self.df_all['Well_Name'] == well_name].copy()
+        
+        # Use cached aggregated data if multiple wells are selected, otherwise use df_all
+        if len(self.applied_wells) > 1 and self.df_aggregated_cache is not None:
+            df_well = self.df_aggregated_cache.copy()
+        else:
+            well_name = self.get_primary_well()
+            if not well_name:
+                return
+            df_well = self.df_all[self.df_all['Well_Name'] == well_name].copy()
+        
         df_well['Prod_Date'] = pd.to_datetime(df_well['Prod_Date'])
         df_well = df_well.sort_values('Prod_Date')
         idx = np.searchsorted(df_well['Prod_Date'], date_clicked)
@@ -1917,10 +1970,16 @@ class DeclineCurveApp(QMainWindow):
             QMessageBox.warning(self, "Invalid Point", "Please click on a valid data point with positive rate.")
             return
         date_clicked = pd.to_datetime(clicked_date, unit='D')
-        well_name = self.well_combo.currentText()
-        if not well_name:
-            return
-        df_well = self.df_all[self.df_all['Well_Name'] == well_name].copy()
+        
+        # Use cached aggregated data if multiple wells are selected, otherwise use df_all
+        if len(self.applied_wells) > 1 and self.df_aggregated_cache is not None:
+            df_well = self.df_aggregated_cache.copy()
+        else:
+            well_name = self.get_primary_well()
+            if not well_name:
+                return
+            df_well = self.df_all[self.df_all['Well_Name'] == well_name].copy()
+        
         df_well['Prod_Date'] = pd.to_datetime(df_well['Prod_Date'])
         df_well = df_well.sort_values('Prod_Date')
         idx = np.searchsorted(df_well['Prod_Date'], date_clicked)
@@ -2314,61 +2373,140 @@ class DeclineCurveApp(QMainWindow):
         
         config_dialog.exec()
 
-    def on_district_select(self, district):
-        if district:
-            self.current_district = district
+    def populate_well_tree(self):
+        """Populate the tree widget with district -> field -> formation -> well hierarchy"""
+        self.well_tree.clear()
+        self._updating_tree = False  # Flag to prevent recursive updates
+        
+        for district in self.districts:
+            district_item = QTreeWidgetItem([district])
+            district_item.setFlags(district_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            district_item.setCheckState(0, Qt.CheckState.Unchecked)
+            district_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'district', 'name': district})
+            
             fields = self.fields_by_district.get(district, [])
-            self.field_combo.clear()
-            self.field_combo.addItems(fields)
-            if fields:
-                self.current_field = fields[0]
-                self.field_combo.setCurrentIndex(0)
-                self.on_field_select(fields[0])
-            else:
-                self.formation_combo.clear()
-                self.well_combo.clear()
-
-    def on_field_select(self, field):
-        district = self.district_combo.currentText()
-        if district and field:
-            self.current_field = field
-            formations = self.formations_by_field.get(f"{district}|{field}", [])
-            self.formation_combo.clear()
-            self.formation_combo.addItems(formations)
-            if formations:
-                self.current_formation = formations[0]
-                self.formation_combo.setCurrentIndex(0)
-                self.on_formation_select(formations[0])
-            else:
-                self.well_combo.clear()
-
-    def on_formation_select(self, formation):
-        district = self.district_combo.currentText()
-        field = self.field_combo.currentText()
-        if district and field and formation:
-            self.current_formation = formation
-            wells = self.wells_by_formation.get(f"{district}|{field}|{formation}", [])
-            self.well_combo.clear()
-            self.well_combo.addItems(wells)
-            if wells:
-                self.well_combo.setCurrentIndex(0)
+            for field in fields:
+                field_item = QTreeWidgetItem([field])
+                field_item.setFlags(field_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                field_item.setCheckState(0, Qt.CheckState.Unchecked)
+                field_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'field', 'name': field, 'district': district})
+                
+                formations = self.formations_by_field.get(f"{district}|{field}", [])
+                for formation in formations:
+                    formation_item = QTreeWidgetItem([formation])
+                    formation_item.setFlags(formation_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    formation_item.setCheckState(0, Qt.CheckState.Unchecked)
+                    formation_item.setData(0, Qt.ItemDataRole.UserRole, 
+                                          {'type': 'formation', 'name': formation, 'district': district, 'field': field})
+                    
+                    wells = self.wells_by_formation.get(f"{district}|{field}|{formation}", [])
+                    for well in wells:
+                        well_item = QTreeWidgetItem([well])
+                        well_item.setFlags(well_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        well_item.setCheckState(0, Qt.CheckState.Unchecked)
+                        well_item.setData(0, Qt.ItemDataRole.UserRole, 
+                                         {'type': 'well', 'name': well, 'district': district, 
+                                          'field': field, 'formation': formation})
+                        formation_item.addChild(well_item)
+                    
+                    field_item.addChild(formation_item)
+                district_item.addChild(field_item)
+            
+            self.well_tree.addTopLevelItem(district_item)
     
-    def on_well_select(self, well):
-        """Reset parameters or restore from session when well selection changes"""
-        # Don't reset during initialization
-        if hasattr(self, 'initializing') and self.initializing:
+    def on_tree_item_changed(self, item, column):
+        """Handle checkbox changes in the tree with parent/child relationships"""
+        if self._updating_tree:
             return
-        if well:  # Only reset if a well is actually selected
-            # Check if there's a session analysis for this well
-            if well in self.session_analyses:
-                # Restore the analysis from session
-                data = self.session_analyses[well]
-                self.apply_analysis_data(data)
-                # Re-run to display the chart
-                self.run_analysis()
-            else:
-                # No session data, reset to defaults
-                self.reset_parameters()
+        
+        self._updating_tree = True
+        
+        # Update children when parent is checked/unchecked
+        check_state = item.checkState(0)
+        self._update_children(item, check_state)
+        
+        # Update parent state based on children
+        parent = item.parent()
+        if parent:
+            self._update_parent_state(parent)
+        
+        self._updating_tree = False
+    
+    def _update_children(self, item, check_state):
+        """Recursively update all children to match parent's check state"""
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child.setCheckState(0, check_state)
+            self._update_children(child, check_state)
+    
+    def _update_parent_state(self, parent):
+        """Update parent's check state based on children's states"""
+        if not parent:
+            return
+        
+        checked_count = 0
+        unchecked_count = 0
+        
+        for i in range(parent.childCount()):
+            child = parent.child(i)
+            if child.checkState(0) == Qt.CheckState.Checked:
+                checked_count += 1
+            elif child.checkState(0) == Qt.CheckState.Unchecked:
+                unchecked_count += 1
+        
+        # Set parent state based on children
+        if checked_count > 0 and unchecked_count == 0:
+            parent.setCheckState(0, Qt.CheckState.Checked)
+        elif checked_count > 0:
+            parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
+        else:
+            parent.setCheckState(0, Qt.CheckState.Unchecked)
+        
+        # Recursively update grandparent
+        grandparent = parent.parent()
+        if grandparent:
+            self._update_parent_state(grandparent)
+    
+    def get_selected_wells(self):
+        """Get list of all selected well names from the tree"""
+        selected_wells = []
+        
+        def traverse_tree(item):
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data['type'] == 'well' and item.checkState(0) == Qt.CheckState.Checked:
+                selected_wells.append(data['name'])
+            
+            for i in range(item.childCount()):
+                traverse_tree(item.child(i))
+        
+        # Traverse all top-level items
+        for i in range(self.well_tree.topLevelItemCount()):
+            traverse_tree(self.well_tree.topLevelItem(i))
+        
+        return selected_wells
+    
+    def get_primary_well(self):
+        """Get the first applied well (for backward compatibility with single-well operations)"""
+        return self.applied_wells[0] if self.applied_wells else None
+    
+    def refresh_tree_display(self):
+        """Refresh the tree widget display to show correct checkbox states using toggle trick"""
+        # Set the updating flag to prevent triggering itemChanged events
+        self._updating_tree = True
+        
+        # Toggle expansion state of root items to force visual refresh
+        # This tricks Qt into redrawing the tree properly
+        for i in range(self.well_tree.topLevelItemCount()):
+            item = self.well_tree.topLevelItem(i)
+            was_expanded = item.isExpanded()
+            item.setExpanded(not was_expanded)
+            item.setExpanded(was_expanded)
+        
+        # Force viewport update
+        self.well_tree.viewport().update()
+        
+        # Reset the updating flag
+        self._updating_tree = False
     
     def reset_parameters(self):
         """Reset all parameters to defaults except district/field/formation/well filters"""
@@ -2417,17 +2555,21 @@ class DeclineCurveApp(QMainWindow):
         # Clear results text
         self.results_text.clear()
         
-        # Remove current well's analysis from session storage
-        well_name = self.well_combo.currentText()
-        if well_name:
+        # Clear session storage for applied wells (but keep applied_wells intact)
+        for well_name in self.applied_wells:
             # Remove from session analyses if it exists
             if well_name in self.session_analyses:
                 del self.session_analyses[well_name]
             # Remove from saved analyses tracking if it exists
             if well_name in self.saved_analyses:
                 del self.saved_analyses[well_name]
-            # Display raw data
-            self.display_raw_data(well_name)
+        
+        # Display raw data chart for currently applied wells (without clearing selection)
+        if self.applied_wells:
+            self.display_aggregated_raw_data(self.applied_wells)
+        
+        # Refresh tree display
+        self.refresh_tree_display()
     
     def display_raw_data(self, well_name):
         """Display only raw production data points in black without any analysis"""
@@ -2474,8 +2616,194 @@ class DeclineCurveApp(QMainWindow):
         self.current_well_name = None
         self.current_analysis_params = None
 
+    def display_aggregated_raw_data(self, well_names):
+        """Display aggregated raw production data for multiple wells without any analysis"""
+        if not well_names:
+            return
+        
+        # Create aggregated dataset
+        df_aggregated = self.aggregate_well_data(well_names)
+        if df_aggregated is None or df_aggregated.empty:
+            return
+        
+        # Cache the aggregated data for chart click selection
+        self.df_aggregated_cache = df_aggregated.copy()
+        
+        df_aggregated = df_aggregated.sort_values('Prod_Date')
+        df_aggregated['Prod_Date'] = pd.to_datetime(df_aggregated['Prod_Date'])
+        df_aggregated['days_in_month'] = df_aggregated['Prod_Date'].apply(get_days_in_month)
+        df_aggregated['oil_prod_daily'] = df_aggregated['M_Oil_Prod'] / df_aggregated['days_in_month']
+        
+        # Create simple plot with only raw data
+        fig, ax = plt.subplots(figsize=(12, 7))
+        ax.plot(df_aggregated['Prod_Date'], df_aggregated['oil_prod_daily'], 'o', color='black', 
+                label='Production Data', markersize=6)
+        
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Oil Production Rate (bbl/day)')
+        
+        # Create title based on number of wells
+        if len(well_names) == 1:
+            title = f'Well: {well_names[0]}'
+        else:
+            title = f'Aggregated Production ({len(well_names)} wells)'
+        ax.set_title(title)
+        
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(bottom=0)
+        fig.tight_layout()
+        
+        # Display the plot
+        if self.canvas:
+            self.canvas_layout.removeWidget(self.canvas)
+            self.canvas.deleteLater()
+        if self.toolbar:
+            self.canvas_layout.removeWidget(self.toolbar)
+            self.toolbar.deleteLater()
+        
+        self.figure = fig
+        self.canvas = FigureCanvasQTAgg(fig)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self.canvas_frame)
+        self.canvas_layout.addWidget(self.toolbar)
+        self.canvas_layout.addWidget(self.canvas)
+        
+        # Reset event filter flag for new canvas
+        self.event_filter_installed = False
+        
+        # Clear analysis params since this is just raw data
+        self.current_well_name = None
+        self.current_analysis_params = None
+
+    def aggregate_well_data(self, well_names):
+        """Aggregate production data from multiple wells by summing monthly production"""
+        if not well_names:
+            return None
+        
+        # Get data for all selected wells
+        df_combined = self.df_all[self.df_all['Well_Name'].isin(well_names)].copy()
+        if df_combined.empty:
+            return None
+        
+        # Convert date and sort
+        df_combined['Prod_Date'] = pd.to_datetime(df_combined['Prod_Date'])
+        
+        # Group by date and sum the monthly production
+        df_aggregated = df_combined.groupby('Prod_Date').agg({
+            'M_Oil_Prod': 'sum',
+            'District': 'first',  # Keep first district
+            'Field': 'first',     # Keep first field
+            'Alias_Formation': 'first'  # Keep first formation
+        }).reset_index()
+        
+        # Create a synthetic well name for display
+        if len(well_names) == 1:
+            df_aggregated['Well_Name'] = well_names[0]
+        else:
+            df_aggregated['Well_Name'] = f"Aggregated ({len(well_names)} wells)"
+        
+        return df_aggregated
+
+    def apply_selection(self):
+        """Apply the current tree selection for analysis"""
+        # Get selected wells
+        selected_wells = self.get_selected_wells()
+        
+        if not selected_wells:
+            QMessageBox.warning(self, "Warning", "Please select at least one well from the tree")
+            return
+        
+        # Store the applied selection
+        self.applied_wells = selected_wells
+        
+        # Update the status label
+        if len(selected_wells) == 1:
+            status_text = f"Applied: {selected_wells[0]}"
+        else:
+            status_text = f"Applied: {len(selected_wells)} wells"
+        
+        self.applied_selection_label.setText(status_text)
+        self.applied_selection_label.setStyleSheet("""
+            QLabel {
+                color: #27ae60;
+                font-weight: bold;
+                font-size: 10px;
+            }
+        """)
+        
+        # Display the aggregated raw data on the chart
+        self.display_aggregated_raw_data(selected_wells)
+    
+    def clear_selection(self):
+        """Clear all checkboxes in the tree and reset the chart"""
+        # Temporarily disconnect signal to avoid triggering events
+        self.well_tree.itemChanged.disconnect(self.on_tree_item_changed)
+        
+        # Uncheck all items in the tree
+        def uncheck_all(item):
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            for i in range(item.childCount()):
+                uncheck_all(item.child(i))
+        
+        for i in range(self.well_tree.topLevelItemCount()):
+            uncheck_all(self.well_tree.topLevelItem(i))
+        
+        # Reconnect signal
+        self.well_tree.itemChanged.connect(self.on_tree_item_changed)
+        
+        # Clear applied selection
+        self.applied_wells = []
+        self.df_aggregated_cache = None
+        self.applied_selection_label.setText("No selection applied")
+        self.applied_selection_label.setStyleSheet("""
+            QLabel {
+                color: #7f8c8d;
+                font-style: italic;
+                font-size: 10px;
+            }
+        """)
+        
+        # Clear the chart
+        if self.canvas:
+            self.canvas_layout.removeWidget(self.canvas)
+            self.canvas.deleteLater()
+            self.canvas = None
+        if self.toolbar:
+            self.canvas_layout.removeWidget(self.toolbar)
+            self.toolbar.deleteLater()
+            self.toolbar = None
+        
+        self.figure = None
+        self.current_well_name = None
+        self.current_analysis_params = None
+
     def run_analysis(self):
-        well_name = self.well_combo.currentText()
+        """Run analysis on applied selection (single or aggregated wells)"""
+        if not self.applied_wells:
+            QMessageBox.warning(self, "Warning", "Please apply a selection first using the 'Apply Selection' button")
+            return
+        
+        # Create aggregated dataset
+        df_aggregated = self.aggregate_well_data(self.applied_wells)
+        if df_aggregated is None or df_aggregated.empty:
+            QMessageBox.warning(self, "Warning", "No data found for applied wells")
+            return
+        
+        # Cache the aggregated data for chart click selection
+        self.df_aggregated_cache = df_aggregated.copy()
+        
+        # Temporarily replace df_all with aggregated data for analysis
+        original_df = self.df_all
+        self.df_all = df_aggregated
+        
+        try:
+            # Run the analysis with the aggregated data
+            self.run_analysis_internal(df_aggregated['Well_Name'].iloc[0])
+        finally:
+            # Restore original dataframe
+            self.df_all = original_df
+
+    def run_analysis_internal(self, well_name):
         if not well_name:
             QMessageBox.warning(self, "Warning", "Please select a well")
             return
