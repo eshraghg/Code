@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QComboBox, QPushButton, QCheckBox, QLineEdit, QTextEdit,
                              QTabWidget, QGroupBox, QGridLayout, QRadioButton, QButtonGroup,
                              QMessageBox, QSplitter, QFrame, QListWidget, QDialog, QDialogButtonBox,
-                             QSizePolicy, QTreeWidget, QTreeWidgetItem, QStyleFactory)
+                             QSizePolicy, QTreeWidget, QTreeWidgetItem, QStyleFactory, QFileDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QTimer
 from PyQt6.QtGui import QFont, QPalette, QColor, QCursor
 import sys
@@ -230,8 +230,6 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
     ax.set_xlabel('Date')
     ax.set_ylabel('Oil Production Rate (bbl/day)')
     title = f'Well {well_id}'
-    if start_method:
-        title += f'\nStart Index Method: {start_method}'
     ax.set_title(title)
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -888,6 +886,8 @@ class DeclineCurveApp(QMainWindow):
                         wells = sorted([w for w in formation_data['Well_Name'].dropna().unique() if str(w).strip()])
                         self.wells_by_formation[f"{district}|{field}|{formation}"] = wells
             self.initializing = True  # Flag to prevent reset during initialization
+            # Keep a reference to the full dataset for title computations
+            self.df_master = self.df_all.copy()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
             sys.exit(1)
@@ -918,6 +918,9 @@ class DeclineCurveApp(QMainWindow):
         self.well_tree.setStyle(QStyleFactory.create("Fusion"))
         self.well_tree.setMinimumHeight(200)
         self.well_tree.setMaximumHeight(300)
+        # Disable item selection/highlighting (only checkboxes are interactive)
+        self.well_tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
+        self.well_tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.well_tree.itemChanged.connect(self.on_tree_item_changed)
         
         # Populate the tree
@@ -986,114 +989,73 @@ class DeclineCurveApp(QMainWindow):
         saveload_layout.setSpacing(8)
         saveload_group.setLayout(saveload_layout)
         
-        # Left column for Load buttons
-        load_column = QVBoxLayout()
-        load_column.setSpacing(4)
-        
-        self.load_current_btn = QPushButton("Load (Current Well)")
-        self.load_current_btn.clicked.connect(self.load_current_well)
-        self.load_current_btn.setStyleSheet("""
+        # Load button
+        self.load_session_btn = QPushButton("Load Session")
+        self.load_session_btn.clicked.connect(self.load_session)
+        self.load_session_btn.setToolTip("Load all analyses from a saved session file")
+        self.load_session_btn.setStyleSheet("""
             QPushButton {
                 background-color: #9b59b6;
-                font-size: 11px;
-                padding: 4px 8px;
-                min-height: 24px;
-                max-height: 28px;
+                font-size: 12px;
+                padding: 6px 12px;
+                min-height: 32px;
             }
             QPushButton:hover {
                 background-color: #8e44ad;
             }
         """)
-        load_column.addWidget(self.load_current_btn)
+        saveload_layout.addWidget(self.load_session_btn)
         
-        self.load_latest_current_btn = QPushButton("Load (Latest for Current Well)")
-        self.load_latest_current_btn.clicked.connect(self.load_latest_current_well)
-        self.load_latest_current_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9b59b6;
-                font-size: 11px;
-                padding: 4px 8px;
-                min-height: 24px;
-                max-height: 28px;
-            }
-            QPushButton:hover {
-                background-color: #8e44ad;
-            }
-        """)
-        load_column.addWidget(self.load_latest_current_btn)
-        
-        self.load_all_latest_btn = QPushButton("Load All (Latest models for all wells)")
-        self.load_all_latest_btn.clicked.connect(self.load_all_latest)
-        self.load_all_latest_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9b59b6;
-                font-size: 11px;
-                padding: 4px 8px;
-                min-height: 24px;
-                max-height: 28px;
-            }
-            QPushButton:hover {
-                background-color: #8e44ad;
-            }
-        """)
-        load_column.addWidget(self.load_all_latest_btn)
-        
-        saveload_layout.addLayout(load_column)
-        
-        # Right column for Save buttons
-        save_column = QVBoxLayout()
-        save_column.setSpacing(4)
-        
-        self.save_current_btn = QPushButton("Save (Current Well)")
-        self.save_current_btn.clicked.connect(self.save_current_well)
-        self.save_current_btn.setStyleSheet("""
+        # Save button
+        self.save_session_btn = QPushButton("Save Session")
+        self.save_session_btn.clicked.connect(self.save_session)
+        self.save_session_btn.setToolTip("Save all analyses in the current session to a file")
+        self.save_session_btn.setStyleSheet("""
             QPushButton {
                 background-color: #16a085;
-                font-size: 11px;
-                padding: 4px 8px;
-                min-height: 24px;
-                max-height: 28px;
+                font-size: 12px;
+                padding: 6px 12px;
+                min-height: 32px;
             }
             QPushButton:hover {
                 background-color: #138d75;
             }
         """)
-        save_column.addWidget(self.save_current_btn)
+        saveload_layout.addWidget(self.save_session_btn)
         
-        self.save_all_btn = QPushButton("Save (Models for All Wells)")
-        self.save_all_btn.clicked.connect(self.save_all_wells)
-        self.save_all_btn.setStyleSheet("""
+        # View Analyses button
+        self.view_analyses_btn = QPushButton("View Analyses")
+        self.view_analyses_btn.clicked.connect(self.show_analyses_list)
+        self.view_analyses_btn.setToolTip("View and select from available analyses in the current session")
+        self.view_analyses_btn.setStyleSheet("""
             QPushButton {
-                background-color: #16a085;
-                font-size: 11px;
-                padding: 4px 8px;
-                min-height: 24px;
-                max-height: 28px;
+                background-color: #f39c12;
+                font-size: 12px;
+                padding: 6px 12px;
+                min-height: 32px;
             }
             QPushButton:hover {
-                background-color: #138d75;
+                background-color: #e67e22;
             }
         """)
-        save_column.addWidget(self.save_all_btn)
+        saveload_layout.addWidget(self.view_analyses_btn)
         
         # Exit button
         self.exit_btn = QPushButton("Exit")
         self.exit_btn.clicked.connect(self.exit_application)
+        self.exit_btn.setToolTip("Exit the application")
         self.exit_btn.setStyleSheet("""
             QPushButton {
                 background-color: #e74c3c;
-                font-size: 11px;
-                padding: 4px 8px;
-                min-height: 24px;
-                max-height: 28px;
+                font-size: 12px;
+                padding: 6px 12px;
+                min-height: 32px;
             }
             QPushButton:hover {
                 background-color: #c0392b;
             }
         """)
-        save_column.addWidget(self.exit_btn)
-        
-        saveload_layout.addLayout(save_column)
+        saveload_layout.addWidget(self.exit_btn)
         
         top_horizontal_layout.addWidget(saveload_group, 1)
         
@@ -1341,6 +1303,8 @@ class DeclineCurveApp(QMainWindow):
         data = {
             'timestamp': datetime.now().isoformat(),
             'well_name': well_name,
+            'applied_wells': self.applied_wells if hasattr(self, 'applied_wells') else [well_name],  # Store all wells in selection
+            'is_aggregated': len(self.applied_wells) > 1 if hasattr(self, 'applied_wells') else False,
             'district': district if district else '',
             'field': field if field else '',
             'formation': formation if formation else '',
@@ -1557,6 +1521,11 @@ class DeclineCurveApp(QMainWindow):
             self.current_analysis_params = data.get('analysis_params')
             self.current_well_name = data.get('well_name')
             
+            # Restore applied wells selection (for aggregated analyses)
+            applied_wells = data.get('applied_wells', [data.get('well_name')])
+            if applied_wells:
+                self.applied_wells = applied_wells
+            
             return True
         except Exception as e:
             print(f"Error applying analysis data: {e}")
@@ -1730,43 +1699,490 @@ class DeclineCurveApp(QMainWindow):
                 message += "\n\nSwitch to a well to view its loaded analysis."
             QMessageBox.information(self, "Success", message)
     
+    def save_session(self):
+        """Save all analyses in the current session to a single file"""
+        if not self.session_analyses:
+            QMessageBox.warning(self, "Warning", 
+                               "No analyses in current session to save.\n\n"
+                               "Please run analyses first or load existing analyses.")
+            return
+        
+        # Ask user for filename
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Session",
+            str(Path("Saved")),
+            "Session Files (*.json);;All Files (*.*)"
+        )
+        
+        if not filename:
+            return  # User cancelled
+        
+        # Ensure the filename has .json extension
+        if not filename.endswith('.json'):
+            filename += '.json'
+        
+        try:
+            # Create session data structure
+            session_data = {
+                'timestamp': datetime.now().isoformat(),
+                'version': '1.0',
+                'well_count': len(self.session_analyses),
+                'analyses': self.session_analyses
+            }
+            
+            # Convert to JSON-serializable format
+            session_data = self.convert_to_json_serializable(session_data)
+            
+            # Save to file
+            with open(filename, 'w') as f:
+                json.dump(session_data, f, indent=2)
+            
+            # Mark all wells as saved
+            for well_name in self.session_analyses:
+                self.saved_analyses[well_name] = True
+            
+            QMessageBox.information(self, "Success", 
+                                   f"Session saved successfully!\n\n"
+                                   f"File: {Path(filename).name}\n"
+                                   f"Number of Analyses: {len(self.session_analyses)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save session: {str(e)}")
+    
+    def load_session(self):
+        """Load all analyses from a session file"""
+        # Open file dialog
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Session",
+            str(Path("Saved")),
+            "Session Files (*.json);;All Files (*.*)"
+        )
+        
+        if not filename:
+            return  # User cancelled
+        
+        try:
+            # Load from file
+            with open(filename, 'r') as f:
+                session_data = json.load(f)
+            
+            # Check if it's a session file or old format
+            if 'analyses' in session_data:
+                # New session format
+                analyses = session_data['analyses']
+                well_count = session_data.get('well_count', len(analyses))
+            elif 'well_name' in session_data:
+                # Old format - single well analysis
+                well_name = session_data['well_name']
+                analyses = {well_name: session_data}
+                well_count = 1
+            else:
+                QMessageBox.critical(self, "Error", "Invalid session file format")
+                return
+            
+            # Check if there are unsaved analyses in current session
+            unsaved_wells = []
+            for well_name in self.session_analyses:
+                if not self.saved_analyses.get(well_name, False):
+                    unsaved_wells.append(well_name)
+            
+            if unsaved_wells:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Unsaved Changes")
+                msg.setIcon(QMessageBox.Icon.Warning)
+                msg.setText(f"You have {len(unsaved_wells)} unsaved analysis/analyses in the current session:")
+                msg.setInformativeText("\n".join(unsaved_wells[:10]) + 
+                                      ("\n..." if len(unsaved_wells) > 10 else "") +
+                                      "\n\nLoading a new session will discard these changes.")
+                
+                continue_btn = msg.addButton("Continue Loading", QMessageBox.ButtonRole.AcceptRole)
+                cancel_btn = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                msg.setDefaultButton(cancel_btn)
+                
+                msg.exec()
+                
+                if msg.clickedButton() == cancel_btn:
+                    return
+            
+            # Clear current session and load new analyses
+            self.session_analyses.clear()
+            self.saved_analyses.clear()
+            
+            loaded_count = 0
+            failed_wells = []
+            
+            for well_name, data in analyses.items():
+                try:
+                    self.session_analyses[well_name] = data
+                    self.saved_analyses[well_name] = True  # Loaded from file, so it's saved
+                    loaded_count += 1
+                except Exception as e:
+                    failed_wells.append(well_name)
+                    print(f"Failed to load {well_name}: {e}")
+            
+            if loaded_count == 0:
+                QMessageBox.warning(self, "Error", "Failed to load any analyses from the session file")
+                return
+            
+            # Show success message without changing the current display
+            if failed_wells:
+                QMessageBox.warning(self, "Partial Success", 
+                                   f"Loaded {loaded_count} well(s) into session.\n\n"
+                                   f"Failed to load: {', '.join(failed_wells)}\n\n"
+                                   f"Select wells from the tree and apply to view loaded analyses.")
+            else:
+                QMessageBox.information(self, "Success", 
+                                       f"Successfully loaded {loaded_count} analysis/analyses into session!\n\n"
+                                       f"Select wells from the tree and apply to view loaded analyses.")
+        
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "Error", f"Invalid JSON file: {str(e)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load session: {str(e)}")
+    
+    def get_hierarchy_display_name(self, well_names):
+        """Determine the best display name for a set of wells based on hierarchy"""
+        if not well_names or len(well_names) == 0:
+            return "Unknown"
+        
+        if len(well_names) == 1:
+            return well_names[0]
+        
+        # Get hierarchy info for each well
+        well_hierarchy = {}
+        for well in well_names:
+            # Find the well in the hierarchy
+            for key, wells in self.wells_by_formation.items():
+                if well in wells:
+                    district, field, formation = key.split('|')
+                    well_hierarchy[well] = {
+                        'district': district,
+                        'field': field,
+                        'formation': formation
+                    }
+                    break
+        
+        # If we couldn't find hierarchy for all wells, return generic
+        if len(well_hierarchy) != len(well_names):
+            return f"Multiple Wells ({len(well_names)} wells)"
+        
+        # Get unique districts, fields, formations
+        districts = set(info['district'] for info in well_hierarchy.values())
+        fields = set(info['field'] for info in well_hierarchy.values())
+        formations = set(info['formation'] for info in well_hierarchy.values())
+        
+        # Check if wells span entire district(s)
+        spanning_districts = []
+        for district in districts:
+            # Get all wells in this district
+            all_district_wells = set()
+            for field in self.fields_by_district.get(district, []):
+                for formation in self.formations_by_field.get(f"{district}|{field}", []):
+                    all_district_wells.update(self.wells_by_formation.get(f"{district}|{field}|{formation}", []))
+            
+            # Check if selected wells include all wells in this district
+            district_wells = set(w for w, info in well_hierarchy.items() if info['district'] == district)
+            if district_wells == all_district_wells:
+                spanning_districts.append(district)
+        
+        if spanning_districts:
+            if len(spanning_districts) == 1:
+                return f"{spanning_districts[0]} ({len(well_names)} wells)"
+            else:
+                return f"{', '.join(spanning_districts)} ({len(well_names)} wells)"
+        
+        # Check if wells span entire field(s)
+        spanning_fields = []
+        for district in districts:
+            for field in self.fields_by_district.get(district, []):
+                if field not in fields:
+                    continue
+                # Get all wells in this field
+                all_field_wells = set()
+                for formation in self.formations_by_field.get(f"{district}|{field}", []):
+                    all_field_wells.update(self.wells_by_formation.get(f"{district}|{field}|{formation}", []))
+                
+                # Check if selected wells include all wells in this field
+                field_wells = set(w for w, info in well_hierarchy.items() 
+                                if info['district'] == district and info['field'] == field)
+                if field_wells == all_field_wells:
+                    spanning_fields.append((district, field))
+        
+        if spanning_fields:
+            if len(spanning_fields) == 1:
+                district, field = spanning_fields[0]
+                return f"{district}-{field} ({len(well_names)} wells)"
+            else:
+                field_names = [f"{d}-{f}" for d, f in spanning_fields]
+                return f"{', '.join(field_names)} ({len(well_names)} wells)"
+        
+        # Check if wells span entire formation(s)
+        spanning_formations = []
+        for district in districts:
+            for field in self.fields_by_district.get(district, []):
+                if field not in fields:
+                    continue
+                for formation in self.formations_by_field.get(f"{district}|{field}", []):
+                    if formation not in formations:
+                        continue
+                    # Get all wells in this formation
+                    all_formation_wells = set(self.wells_by_formation.get(f"{district}|{field}|{formation}", []))
+                    
+                    # Check if selected wells include all wells in this formation
+                    formation_wells = set(w for w, info in well_hierarchy.items() 
+                                        if info['district'] == district and 
+                                           info['field'] == field and 
+                                           info['formation'] == formation)
+                    if formation_wells == all_formation_wells:
+                        spanning_formations.append((district, field, formation))
+        
+        if spanning_formations:
+            if len(spanning_formations) == 1:
+                district, field, formation = spanning_formations[0]
+                return f"{district}-{field}-{formation} ({len(well_names)} wells)"
+            else:
+                formation_names = [f"{d}-{f}-{fm}" for d, f, fm in spanning_formations]
+                if len(formation_names) <= 3:
+                    return f"{', '.join(formation_names)} ({len(well_names)} wells)"
+                else:
+                    return f"{formation_names[0]} and {len(formation_names)-1} more ({len(well_names)} wells)"
+        
+        # Default: partial selection
+        return f"Multiple Wells ({len(well_names)} wells)"
+    
+    def show_analyses_list(self):
+        """Show a dialog with list of all analyses in the current session"""
+        if not self.session_analyses:
+            QMessageBox.information(self, "No Analyses", 
+                                   "No analyses found in the current session.\n\n"
+                                   "Run analyses on wells and they will appear here.")
+            return
+        
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Available Analyses ({len(self.session_analyses)})")
+        dialog.setMinimumSize(600, 400)
+        layout = QVBoxLayout(dialog)
+        
+        # Add instruction label
+        instruction = QLabel("Double-click on an analysis to load and display it:")
+        instruction.setStyleSheet("font-weight: bold; color: #2c3e50; margin-bottom: 5px;")
+        layout.addWidget(instruction)
+        
+        # Create list widget
+        list_widget = QListWidget()
+        list_widget.setStyleSheet("""
+            QListWidget {
+                font-size: 11px;
+                border: 1px solid #bdc3c7;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #ecf0f1;
+            }
+            QListWidget::item:hover {
+                background-color: #ecf0f1;
+            }
+            QListWidget::item:selected {
+                background-color: #3498db;
+                color: white;
+            }
+        """)
+        
+        # Populate list with analyses
+        for well_name, data in self.session_analyses.items():
+            applied_wells = data.get('applied_wells', [well_name])
+            saved_status = "✓ Saved" if self.saved_analyses.get(well_name, False) else "✗ Unsaved"
+            
+            # Get meaningful display name based on hierarchy
+            hierarchy_name = self.get_hierarchy_display_name(applied_wells)
+            
+            # Format the display text
+            display_text = f"{hierarchy_name}            {saved_status}"
+            
+            item = list_widget.addItem(display_text)
+            # Store the well_name as item data for retrieval
+            list_widget.item(list_widget.count() - 1).setData(Qt.ItemDataRole.UserRole, well_name)
+        
+        layout.addWidget(list_widget)
+        
+        # Add info label
+        info_label = QLabel(f"Total: {len(self.session_analyses)} analysis/analyses in session")
+        info_label.setStyleSheet("color: #7f8c8d; font-style: italic; margin-top: 5px;")
+        layout.addWidget(info_label)
+        
+        # Action buttons: Load, Delete, Close
+        button_layout = QHBoxLayout()
+        load_btn = QPushButton("Load")
+        load_btn.setEnabled(False)
+        delete_btn = QPushButton("Delete")
+        delete_btn.setEnabled(False)
+        close_btn = QPushButton("Close")
+        
+        def update_action_buttons():
+            has_selection = list_widget.currentItem() is not None
+            load_btn.setEnabled(has_selection)
+            delete_btn.setEnabled(has_selection)
+        
+        def on_load_clicked():
+            item = list_widget.currentItem()
+            if not item:
+                return
+            well_name = item.data(Qt.ItemDataRole.UserRole)
+            if well_name and well_name in self.session_analyses:
+                dialog.accept()
+                self.load_analysis_from_session(well_name)
+        
+        def on_delete_clicked():
+            item = list_widget.currentItem()
+            if not item:
+                return
+            well_name = item.data(Qt.ItemDataRole.UserRole)
+            if not well_name:
+                return
+            reply = QMessageBox.question(
+                self,
+                "Delete Analysis",
+                f"Remove analysis for '{well_name}' from this session?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                # Check if this analysis is currently active in the chart
+                is_active = well_name in self.applied_wells if self.applied_wells else False
+                
+                if well_name in self.session_analyses:
+                    del self.session_analyses[well_name]
+                if well_name in self.saved_analyses:
+                    del self.saved_analyses[well_name]
+                row = list_widget.row(item)
+                list_widget.takeItem(row)
+                info_label.setText(f"Total: {len(self.session_analyses)} analysis/analyses in session")
+                update_action_buttons()
+                
+                # If the deleted analysis was active, reset chart and clear tree selection
+                if is_active:
+                    self.clear_selection()
+                
+                if list_widget.count() == 0:
+                    dialog.accept()
+        
+        # Wire up events
+        load_btn.clicked.connect(on_load_clicked)
+        delete_btn.clicked.connect(on_delete_clicked)
+        close_btn.clicked.connect(dialog.accept)
+        list_widget.currentItemChanged.connect(lambda cur, prev: update_action_buttons())
+        
+        # Double-click also loads
+        def on_item_double_clicked(item):
+            list_widget.setCurrentItem(item)
+            on_load_clicked()
+        list_widget.itemDoubleClicked.connect(on_item_double_clicked)
+        
+        # Layout buttons
+        button_layout.addWidget(load_btn)
+        button_layout.addWidget(delete_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(close_btn)
+        layout.addLayout(button_layout)
+        
+        # Show dialog
+        dialog.exec()
+    
+    def load_analysis_from_session(self, well_name):
+        """Load and display an analysis from the session by well name"""
+        if well_name not in self.session_analyses:
+            QMessageBox.warning(self, "Error", f"Analysis for '{well_name}' not found in session")
+            return
+        
+        data = self.session_analyses[well_name]
+        
+        try:
+            # Get the applied wells from the saved data
+            applied_wells = data.get('applied_wells', [well_name])
+            
+            # Clear current selection
+            self.clear_selection()
+            
+            # Select the wells in the tree
+            self.select_wells_in_tree(applied_wells)
+            
+            # Apply the selection
+            self.applied_wells = applied_wells
+            
+            # Update the status label
+            if len(applied_wells) == 1:
+                status_text = f"Applied: {applied_wells[0]}"
+            else:
+                status_text = f"Applied: {len(applied_wells)} wells"
+            
+            self.applied_selection_label.setText(status_text)
+            self.applied_selection_label.setStyleSheet("""
+                QLabel {
+                    color: #27ae60;
+                    font-weight: bold;
+                    font-size: 10px;
+                }
+            """)
+            
+            # Apply the analysis data to GUI
+            if self.apply_analysis_data(data):
+                # Re-run analysis to display the saved results
+                self.run_analysis()
+                QMessageBox.information(self, "Success", 
+                                       f"Successfully loaded analysis for: {well_name}")
+            else:
+                QMessageBox.warning(self, "Error", 
+                                   "Failed to apply analysis data")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", 
+                               f"Failed to load analysis: {str(e)}")
+    
+    def select_wells_in_tree(self, well_names):
+        """Select specified wells in the tree widget by checking their checkboxes"""
+        if not well_names:
+            return
+        
+        # Temporarily disconnect the signal to prevent triggering events
+        self.well_tree.itemChanged.disconnect(self.on_tree_item_changed)
+        self._updating_tree = True
+        
+        # Convert well_names to a set for faster lookup
+        wells_to_select = set(well_names)
+        
+        # Traverse the tree and check matching wells
+        def traverse_and_check(item):
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data['type'] == 'well' and data['name'] in wells_to_select:
+                item.setCheckState(0, Qt.CheckState.Checked)
+                # Update parent states
+                parent = item.parent()
+                while parent:
+                    self._update_parent_state(parent)
+                    parent = parent.parent()
+            
+            # Recursively check children
+            for i in range(item.childCount()):
+                traverse_and_check(item.child(i))
+        
+        # Traverse all top-level items
+        for i in range(self.well_tree.topLevelItemCount()):
+            traverse_and_check(self.well_tree.topLevelItem(i))
+        
+        self._updating_tree = False
+        # Reconnect the signal
+        self.well_tree.itemChanged.connect(self.on_tree_item_changed)
+        
+        # Refresh tree display
+        self.refresh_tree_display()
+    
     def exit_application(self):
         """Exit the application with unsaved changes check"""
-        # Check for unsaved analyses
-        unsaved_wells = []
-        for well_name in self.session_analyses:
-            if not self.saved_analyses.get(well_name, False):
-                unsaved_wells.append(well_name)
-        
-        if unsaved_wells:
-            # Create custom message box with three buttons
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Unsaved Changes")
-            msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setText(f"You have {len(unsaved_wells)} unsaved analysis/analyses:")
-            msg.setInformativeText("\n".join(unsaved_wells[:10]) + 
-                                  ("\n..." if len(unsaved_wells) > 10 else ""))
-            
-            save_btn = msg.addButton("Save All && Exit", QMessageBox.ButtonRole.AcceptRole)
-            dont_save_btn = msg.addButton("Exit Without Saving", QMessageBox.ButtonRole.DestructiveRole)
-            cancel_btn = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-            
-            msg.setDefaultButton(save_btn)
-            msg.exec()
-            
-            clicked_button = msg.clickedButton()
-            
-            if clicked_button == save_btn:
-                # Save all and exit
-                self.save_all_wells()
-                QApplication.quit()
-            elif clicked_button == dont_save_btn:
-                # Exit without saving
-                QApplication.quit()
-            # else: cancel, do nothing
-        else:
-            # No unsaved changes, just exit
-            QApplication.quit()
+        # Simply close the window, which will trigger closeEvent
+        # This avoids showing the dialog twice
+        self.close()
     
     def closeEvent(self, event):
         """Handle window close event (X button)"""
@@ -1796,7 +2212,7 @@ class DeclineCurveApp(QMainWindow):
             
             if clicked_button == save_btn:
                 # Save all and exit
-                self.save_all_wells()
+                self.save_session()
                 event.accept()
             elif clicked_button == dont_save_btn:
                 # Exit without saving
@@ -2446,21 +2862,29 @@ class DeclineCurveApp(QMainWindow):
         
         checked_count = 0
         unchecked_count = 0
+        partial_count = 0
+        total_children = parent.childCount()
         
-        for i in range(parent.childCount()):
+        for i in range(total_children):
             child = parent.child(i)
-            if child.checkState(0) == Qt.CheckState.Checked:
+            state = child.checkState(0)
+            if state == Qt.CheckState.Checked:
                 checked_count += 1
-            elif child.checkState(0) == Qt.CheckState.Unchecked:
+            elif state == Qt.CheckState.Unchecked:
                 unchecked_count += 1
+            elif state == Qt.CheckState.PartiallyChecked:
+                partial_count += 1
         
-        # Set parent state based on children
-        if checked_count > 0 and unchecked_count == 0:
+        # Set parent state based on children's states
+        if checked_count == total_children:
+            # All children are fully checked
             parent.setCheckState(0, Qt.CheckState.Checked)
-        elif checked_count > 0:
-            parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
-        else:
+        elif unchecked_count == total_children:
+            # All children are unchecked
             parent.setCheckState(0, Qt.CheckState.Unchecked)
+        else:
+            # Mixed state: some checked, some unchecked, or any partially checked
+            parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
         
         # Recursively update grandparent
         grandparent = parent.parent()
@@ -2642,11 +3066,8 @@ class DeclineCurveApp(QMainWindow):
         ax.set_xlabel('Date')
         ax.set_ylabel('Oil Production Rate (bbl/day)')
         
-        # Create title based on number of wells
-        if len(well_names) == 1:
-            title = f'Well: {well_names[0]}'
-        else:
-            title = f'Aggregated Production ({len(well_names)} wells)'
+        # Create title based on selection coverage across formation/field/district
+        title = self._build_selection_title(well_names)
         ax.set_title(title)
         
         ax.legend()
@@ -2731,7 +3152,23 @@ class DeclineCurveApp(QMainWindow):
             }
         """)
         
-        # Display the aggregated raw data on the chart
+        # Check if there's a matching analysis in the session
+        matching_analysis = None
+        for well_name, data in self.session_analyses.items():
+            # Check if the applied_wells in the saved data matches current selection
+            saved_wells = data.get('applied_wells', [well_name])
+            if set(saved_wells) == set(selected_wells):
+                matching_analysis = data
+                break
+        
+        # If matching analysis found, restore it
+        if matching_analysis:
+            if self.apply_analysis_data(matching_analysis):
+                # Re-run analysis to display the saved results
+                self.run_analysis()
+                return
+        
+        # Otherwise, display the aggregated raw data on the chart
         self.display_aggregated_raw_data(selected_wells)
     
     def clear_selection(self):
@@ -3035,6 +3472,10 @@ class DeclineCurveApp(QMainWindow):
                     fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None
                 )
 
+        # Override title to reflect grouping-aware selection
+        if fig is not None and getattr(fig, 'axes', None):
+            fig.axes[0].set_title(self._build_selection_title(self.applied_wells))
+
         self.results_text.clear()
         self.results_text.setText(results)
 
@@ -3077,6 +3518,66 @@ class DeclineCurveApp(QMainWindow):
                 self.saved_analyses[well_name] = False  # Mark as unsaved
         else:
             QMessageBox.critical(self, "Error", results)
+
+    def _build_selection_title(self, well_names):
+        """Build a grouping-aware title for the provided wells."""
+        if not well_names:
+            return ""
+        if len(well_names) == 1:
+            return f"Well: {well_names[0]}"
+        selected_set = set(well_names)
+        df_source = getattr(self, 'df_master', None)
+        if df_source is None:
+            df_source = self.df_all
+        df_unique = df_source[[
+            'Well_Name', 'District', 'Field', 'Alias_Formation'
+        ]].drop_duplicates(subset=['Well_Name'])
+        df_selected = df_unique[df_unique['Well_Name'].isin(selected_set)]
+        # Formation level
+        unique_triples = df_selected[['District', 'Field', 'Alias_Formation']].drop_duplicates()
+        if len(unique_triples) == 1:
+            d_val = unique_triples.iloc[0]['District']
+            f_val = unique_triples.iloc[0]['Field']
+            fm_val = unique_triples.iloc[0]['Alias_Formation']
+            full_formation_set = set(
+                df_unique[
+                    (df_unique['District'] == d_val) &
+                    (df_unique['Field'] == f_val) &
+                    (df_unique['Alias_Formation'] == fm_val)
+                ]['Well_Name']
+            )
+            if selected_set == full_formation_set:
+                d_str = str(d_val).strip()
+                f_str = str(f_val).strip()
+                fm_str = str(fm_val).strip()
+                return f"{d_str}-{f_str}-{fm_str} ({len(well_names)} wells)"
+        # Field level
+        unique_pairs = df_selected[['District', 'Field']].drop_duplicates()
+        if len(unique_pairs) == 1:
+            d_val = unique_pairs.iloc[0]['District']
+            f_val = unique_pairs.iloc[0]['Field']
+            full_field_set = set(
+                df_unique[
+                    (df_unique['District'] == d_val) &
+                    (df_unique['Field'] == f_val)
+                ]['Well_Name']
+            )
+            if selected_set == full_field_set:
+                d_str = str(d_val).strip()
+                f_str = str(f_val).strip()
+                return f"{d_str}-{f_str} ({len(well_names)} wells)"
+        # District level
+        unique_districts = df_selected[['District']].drop_duplicates()
+        if len(unique_districts) == 1:
+            d_val = unique_districts.iloc[0]['District']
+            full_district_set = set(
+                df_unique[df_unique['District'] == d_val]['Well_Name']
+            )
+            if selected_set == full_district_set:
+                d_str = str(d_val).strip()
+                return f"{d_str} ({len(well_names)} wells)"
+        # Fallback
+        return f"Aggregated Production ({len(well_names)} wells)"
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
