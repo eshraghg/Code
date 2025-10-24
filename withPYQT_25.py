@@ -749,7 +749,7 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
         print(f"Auto detect enabled: {use_auto_detect}")
         print(f"Large gaps found: {large_gaps.any()}")
         print(f"--- End of gap check ---\n")
-        if start_method not in ["Manual Start Date", "Manual Start Date & Initial Rate (Qi)"] and large_gaps.any():
+        if start_method not in ["Manual Start Date", "Manual Start Date and Initial Rate (Qi)"] and large_gaps.any():
             last_gap_idx = np.where(large_gaps.values)[0][-1]
             points_after_gap = len(df_well) - (last_gap_idx + 1)
             if points_after_gap >= 10:
@@ -1372,11 +1372,11 @@ class DeclineCurveApp(QMainWindow):
         
         start_method_layout.addWidget(self.manual_frame)
 
-        # Manual Start Date & Initial Rate (Qi)
-        self.qi_frame = QGroupBox("Manual Start Date & Initial Rate (Qi)")
+        # Manual Start Date and Initial Rate (Qi)
+        self.qi_frame = QGroupBox("Manual Start Date and Initial Rate (Qi)")
         qi_layout = QVBoxLayout(self.qi_frame)
         
-        self.qi_radio = QRadioButton("Manual Start Date & Initial Rate (Qi)")
+        self.qi_radio = QRadioButton("Manual Start Date and Initial Rate (Qi)")
         self.qi_radio.toggled.connect(lambda checked: self.update_vertical_line_from_inputs() if checked else None)
         self.start_method_buttons.addButton(self.qi_radio, 2)
         qi_layout.addWidget(self.qi_radio)
@@ -1424,7 +1424,7 @@ class DeclineCurveApp(QMainWindow):
         setup_layout.addLayout(button_layout)
         
         # Add to main tabs
-        self.main_tabs.addTab(setup_tab, "Setup")
+        self.main_tabs.addTab(setup_tab, "Analysis")
 
     def create_parameters_tab(self):
         """Create the Parameters tab with optimization controls and action buttons"""
@@ -1458,7 +1458,7 @@ class DeclineCurveApp(QMainWindow):
         parameters_layout.addWidget(self.results_text)
         
         # Add to main tabs
-        self.main_tabs.addTab(parameters_tab, "Parameters")
+        self.main_tabs.addTab(parameters_tab, "Setup")
 
     # =========================================================================
     # HELPER METHODS
@@ -2993,77 +2993,84 @@ class DeclineCurveApp(QMainWindow):
         
         config_dialog = QDialog(self)
         config_dialog.setWindowTitle("Configure Optimization Ranges")
-        config_dialog.setMinimumSize(600, 700)
+        config_dialog.setMinimumSize(600, 500)
         layout = QVBoxLayout()
         config_dialog.setLayout(layout)
         
-        tabs = QTabWidget()
-        layout.addWidget(tabs)
+        # Single ranges widget
+        ranges_widget = QWidget()
+        ranges_layout = QGridLayout()
+        ranges_widget.setLayout(ranges_layout)
         
-        # Filter tab
-        filter_widget = QWidget()
-        filter_layout = QGridLayout()
-        filter_widget.setLayout(filter_layout)
-        filter_vars = {}
-        row = 0
+        # Combine all ranges into a single dictionary
+        all_ranges = {}
+        all_vars = {}
+        
+        # Add filter ranges
         for param, (min_val, max_val) in self.filter_ranges.items():
-            filter_layout.addWidget(QLabel(f"{param}:"), row, 0)
-            filter_layout.addWidget(QLabel("Min:"), row, 1)
-            min_edit = QLineEdit(str(min_val))
-            min_edit.setMaximumWidth(100)
-            filter_layout.addWidget(min_edit, row, 2)
-            filter_layout.addWidget(QLabel("Max:"), row, 3)
-            max_edit = QLineEdit(str(max_val))
-            max_edit.setMaximumWidth(100)
-            filter_layout.addWidget(max_edit, row, 4)
-            filter_vars[param] = (min_edit, max_edit)
-            row += 1
-        tabs.addTab(filter_widget, "Filter Ranges")
+            all_ranges[param] = (min_val, max_val)
         
-        # Auto Start tab
-        auto_start_widget = QWidget()
-        auto_start_layout = QGridLayout()
-        auto_start_widget.setLayout(auto_start_layout)
-        auto_start_vars = {}
-        row = 0
+        # Add auto start ranges
         for param, (min_val, max_val) in self.auto_start_ranges.items():
-            auto_start_layout.addWidget(QLabel(f"{param}:"), row, 0)
-            auto_start_layout.addWidget(QLabel("Min:"), row, 1)
+            all_ranges[param] = (min_val, max_val)
+        
+        # Create form for all ranges
+        row = 0
+        for param, (min_val, max_val) in all_ranges.items():
+            ranges_layout.addWidget(QLabel(f"{param}:"), row, 0)
+            ranges_layout.addWidget(QLabel("Min:"), row, 1)
             min_edit = QLineEdit(str(min_val))
             min_edit.setMaximumWidth(100)
-            auto_start_layout.addWidget(min_edit, row, 2)
-            auto_start_layout.addWidget(QLabel("Max:"), row, 3)
+            ranges_layout.addWidget(min_edit, row, 2)
+            ranges_layout.addWidget(QLabel("Max:"), row, 3)
             max_edit = QLineEdit(str(max_val))
             max_edit.setMaximumWidth(100)
-            auto_start_layout.addWidget(max_edit, row, 4)
-            auto_start_vars[param] = (min_edit, max_edit)
+            ranges_layout.addWidget(max_edit, row, 4)
+            all_vars[param] = (min_edit, max_edit)
             row += 1
-        tabs.addTab(auto_start_widget, "Auto Start Ranges")
+        
+        layout.addWidget(ranges_widget)
         
         # Buttons
         button_layout = QHBoxLayout()
         save_btn = QPushButton("Save")
+        save_btn.setProperty("class", "success")
         reset_btn = QPushButton("Reset to Default")
+        reset_btn.setProperty("class", "secondary")
         cancel_btn = QPushButton("Cancel")
+        cancel_btn.setProperty("class", "secondary")
         
         def save_ranges():
             try:
-                for param, (min_edit, max_edit) in filter_vars.items():
-                    self.filter_ranges[param] = (float(min_edit.text()), float(max_edit.text()))
-                for param, (min_edit, max_edit) in auto_start_vars.items():
-                    self.auto_start_ranges[param] = (float(min_edit.text()), float(max_edit.text()))
+                # Update filter ranges
+                for param in self.filter_ranges.keys():
+                    if param in all_vars:
+                        min_edit, max_edit = all_vars[param]
+                        self.filter_ranges[param] = (float(min_edit.text()), float(max_edit.text()))
+                
+                # Update auto start ranges
+                for param in self.auto_start_ranges.keys():
+                    if param in all_vars:
+                        min_edit, max_edit = all_vars[param]
+                        self.auto_start_ranges[param] = (float(min_edit.text()), float(max_edit.text()))
+                
                 QMessageBox.information(config_dialog, "Success", "Optimization ranges updated successfully!")
                 config_dialog.accept()
             except Exception as e:
                 QMessageBox.critical(config_dialog, "Error", f"Failed to update ranges: {str(e)}")
         
         def reset_ranges():
+            # Reset filter ranges
             for param, (min_val, max_val) in DEFAULT_FILTER_RANGES.items():
-                filter_vars[param][0].setText(str(min_val))
-                filter_vars[param][1].setText(str(max_val))
+                if param in all_vars:
+                    all_vars[param][0].setText(str(min_val))
+                    all_vars[param][1].setText(str(max_val))
+            
+            # Reset auto start ranges
             for param, (min_val, max_val) in DEFAULT_AUTO_START_RANGES.items():
-                auto_start_vars[param][0].setText(str(min_val))
-                auto_start_vars[param][1].setText(str(max_val))
+                if param in all_vars:
+                    all_vars[param][0].setText(str(min_val))
+                    all_vars[param][1].setText(str(max_val))
         
         save_btn.clicked.connect(save_ranges)
         reset_btn.clicked.connect(reset_ranges)
@@ -3502,7 +3509,7 @@ class DeclineCurveApp(QMainWindow):
         elif self.manual_start_radio.isChecked():
             start_method = "Manual Start Date"
         else:
-            start_method = "Manual Start Date & Initial Rate (Qi)"
+            start_method = "Manual Start Date and Initial Rate (Qi)"
             
         manual_start_idx = None
         method_label = start_method
@@ -3510,10 +3517,10 @@ class DeclineCurveApp(QMainWindow):
         df_well_temp['Prod_Date'] = pd.to_datetime(df_well_temp['Prod_Date'])
         df_well_sorted = df_well_temp.sort_values('Prod_Date')
 
-        if start_method != "Manual Start Date & Initial Rate (Qi)":
+        if start_method != "Manual Start Date and Initial Rate (Qi)":
             self.fixed_qi = None
 
-        if start_method in ["Manual Start Date", "Manual Start Date & Initial Rate (Qi)"]:
+        if start_method in ["Manual Start Date", "Manual Start Date and Initial Rate (Qi)"]:
             try:
                 if start_method == "Manual Start Date":
                     year = int(self.manual_year_edit.text())
@@ -3599,7 +3606,7 @@ class DeclineCurveApp(QMainWindow):
                 chosen_idx = find_optimal_start_date(df_well_sorted, **auto_start_params)
                 method_label = "Auto-Detected Optimal Start"
                 n_iter = 15
-            elif start_method in ["Manual Start Date", "Manual Start Date & Initial Rate (Qi)"]:
+            elif start_method in ["Manual Start Date", "Manual Start Date and Initial Rate (Qi)"]:
                 chosen_idx = manual_start_idx
                 n_iter = 10
             else:
@@ -3616,7 +3623,7 @@ class DeclineCurveApp(QMainWindow):
 
                     if start_method == "Auto Select":
                         start_idx = find_optimal_start_date(df_well_sorted, **sampled_auto_start)
-                    elif start_method in ["Manual Start Date", "Manual Start Date & Initial Rate (Qi)"]:
+                    elif start_method in ["Manual Start Date", "Manual Start Date and Initial Rate (Qi)"]:
                         start_idx = manual_start_idx
                     else:
                         start_idx = 0
@@ -3625,8 +3632,8 @@ class DeclineCurveApp(QMainWindow):
                         self.df_all, well_name, manual_start_idx=start_idx,
                         filter_params=sampled_filter,
                         auto_start_params=sampled_auto_start,
-                        ignore_gaps=(start_method in ["Manual Start Date", "Manual Start Date & Initial Rate (Qi)"]),
-                        fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None
+                        ignore_gaps=(start_method in ["Manual Start Date", "Manual Start Date and Initial Rate (Qi)"]),
+                        fixed_qi=self.fixed_qi if start_method == "Manual Start Date and Initial Rate (Qi)" else None
                     )
 
                     if metrics['popt'] is not None:
@@ -3685,7 +3692,7 @@ class DeclineCurveApp(QMainWindow):
                     show_forecast=show_forecast, show_smoothed=show_smoothed,
                     show_channel=show_channel, forecast_duration=forecast_duration,
                     forecast_offset=forecast_offset,
-                    fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None,
+                    fixed_qi=self.fixed_qi if start_method == "Manual Start Date and Initial Rate (Qi)" else None,
                     reference_model=reference_model
                 )
             else:
@@ -3699,7 +3706,7 @@ class DeclineCurveApp(QMainWindow):
                     show_forecast=show_forecast, show_smoothed=show_smoothed,
                     show_channel=show_channel, forecast_duration=forecast_duration,
                     forecast_offset=forecast_offset,
-                    fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None,
+                    fixed_qi=self.fixed_qi if start_method == "Manual Start Date and Initial Rate (Qi)" else None,
                     reference_model=reference_model
                 )
         else:
@@ -3719,7 +3726,7 @@ class DeclineCurveApp(QMainWindow):
                     fixed_qi=None,
                     reference_model=reference_model
                 )
-            elif start_method in ["Manual Start Date", "Manual Start Date & Initial Rate (Qi)"]:
+            elif start_method in ["Manual Start Date", "Manual Start Date and Initial Rate (Qi)"]:
                 fig, results = run_arps_for_well_auto(
                     self.df_all, well_name, outlier_threshold=outlier_threshold,
                     forecast_avg_points=forecast_avg_points, manual_start_idx=manual_start_idx,
@@ -3730,7 +3737,7 @@ class DeclineCurveApp(QMainWindow):
                     show_forecast=show_forecast, show_smoothed=show_smoothed,
                     show_channel=show_channel, forecast_duration=forecast_duration,
                     forecast_offset=forecast_offset,
-                    fixed_qi=self.fixed_qi if start_method == "Manual Start Date & Initial Rate (Qi)" else None,
+                    fixed_qi=self.fixed_qi if start_method == "Manual Start Date and Initial Rate (Qi)" else None,
                     reference_model=reference_model
                 )
 
