@@ -143,7 +143,6 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
                      show_smoothed=False, show_channel=False, forecast_duration=60,
                      forecast_offset=0, reference_model=None):
     if popt is None:
-        print("No fit available to plot.")
         return None
     fig, ax = plt.subplots(figsize=(12, 7))
     q_pred = arps_hyperbolic(t, *popt)
@@ -235,11 +234,9 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
     
     # Plot reference model if provided
     if reference_model is not None:
-        print(f"DEBUG: Reference model is not None, plotting reference model")
         ref_Di = reference_model['Di']
         ref_b = reference_model['b']
         ref_name = reference_model.get('name', 'Reference')
-        print(f"DEBUG: Reference model parameters - Di: {ref_Di}, b: {ref_b}, name: {ref_name}")
         
         # For reference model, we should use the original qi from when the reference was saved
         # But since we don't store the original qi, we'll scale the reference model to match the current model's qi
@@ -254,7 +251,6 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
         # Plot the historical part of reference model
         ax.plot(all_dates, ref_q_historical, '-.', color='purple',
                 label=f'Reference Model ({ref_name})', linewidth=3, alpha=0.8)
-        print(f"DEBUG: Plotted reference model historical part for {ref_name}")
         
         # Only show forecast part if show_forecast is True
         if show_forecast:
@@ -280,7 +276,6 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
             # Plot the forecast part of reference model
             ax.plot(forecast_dates, ref_q_forecast, '-.', color='purple',
                     linewidth=3, alpha=0.8)
-            print(f"DEBUG: Plotted reference model forecast part for {ref_name}")
     
     ax.set_xlabel('Date')
     ax.set_ylabel('Oil Production Rate (bbl/day)')
@@ -795,6 +790,7 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
                            show_outliers, show_pre_decline, show_forecast, 
                            show_smoothed, show_channel, forecast_duration, forecast_offset,
                            reference_model=reference_model)
+    
     results = ""
     if popt is not None:
         n_outliers = np.sum(~mask)
@@ -810,6 +806,7 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
             results += "⚠ CAUTION: Moderate variability. Review forecast carefully.\n"
         else:
             results += "✓ Good data quality for decline curve analysis.\n"
+    
     return fig, results
 
 class DeclineCurveApp(QMainWindow):
@@ -2935,14 +2932,11 @@ class DeclineCurveApp(QMainWindow):
     def update_plot_options(self):
         # Check if we have an analysis to update
         if self.current_analysis_params is None or self.current_well_name is None:
-            
             return
         if self.figure is None:
-            
             return
         
         try:
-            
             show_outliers = self.show_outliers_check.isChecked()
             show_pre_decline = self.show_pre_decline_check.isChecked()
             show_forecast = self.show_forecast_check.isChecked()
@@ -2957,8 +2951,17 @@ class DeclineCurveApp(QMainWindow):
                     reference_model = self.reference_models[selected_ref]
             
             current_offset = max(0, min(120, int(self.forecast_offset_edit.text())))
+            
+            # Check if we're in aggregated mode and use appropriate data
+            if len(self.applied_wells) > 1 and self.df_aggregated_cache is not None:
+                df_to_use = self.df_aggregated_cache
+                well_name_to_use = self.df_aggregated_cache['Well_Name'].iloc[0]
+            else:
+                df_to_use = self.df_all
+                well_name_to_use = self.current_well_name
+            
             fig, results = run_arps_for_well_auto(
-                self.df_all, self.current_well_name,
+                df_to_use, well_name_to_use,
                 outlier_threshold=self.current_analysis_params['outlier_threshold'],
                 forecast_avg_points=self.current_analysis_params['forecast_avg_points'],
                 manual_start_idx=self.current_analysis_params['manual_start_idx'],
