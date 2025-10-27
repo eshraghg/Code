@@ -2882,15 +2882,6 @@ class DeclineCurveApp(QMainWindow):
         self.export_forecast_check.setChecked(False)
         duration_layout.addWidget(self.export_forecast_check)
         
-        # Forecast duration input
-        forecast_duration_layout = QHBoxLayout()
-        forecast_duration_layout.addWidget(QLabel("Duration (months):"))
-        self.export_forecast_duration_edit = QLineEdit("60")
-        self.export_forecast_duration_edit.setMaximumWidth(100)
-        forecast_duration_layout.addWidget(self.export_forecast_duration_edit)
-        forecast_duration_layout.addStretch()
-        duration_layout.addLayout(forecast_duration_layout)
-        
         duration_group.setLayout(duration_layout)
         layout.addWidget(duration_group)
         
@@ -3975,7 +3966,7 @@ class DeclineCurveApp(QMainWindow):
         else:
             QMessageBox.critical(self, "Error", results)
     
-    def create_export_sheet(self, wb, sheet_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly):
+    def create_export_sheet(self, wb, sheet_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly, forecast_avg_points=0, forecast_offset=0):
         """Helper method to create an export sheet for analyses"""
         # Group analyses by formation
         formation_groups = {}
@@ -3996,9 +3987,8 @@ class DeclineCurveApp(QMainWindow):
                     # Use all monthly dates
                     all_dates_list.extend(dates)
                 else:
-                    # Filter to yearly (January only)
-                    yearly_dates = [d for d in dates if d.month == 1]
-                    all_dates_list.extend(yearly_dates)
+                    # For yearly, collect all months (we'll average by year later)
+                    all_dates_list.extend(dates)
         
         # Add forecast dates if requested
         if export_forecast:
@@ -4034,11 +4024,23 @@ class DeclineCurveApp(QMainWindow):
                         if is_monthly:
                             all_dates_list.extend(forecast_dates.tolist())
                         else:
-                            # Filter to yearly (January only)
-                            yearly_dates = [d for d in forecast_dates if d.month == 1]
-                            all_dates_list.extend(yearly_dates)
+                            # For yearly, collect all months (we'll average by year later)
+                            all_dates_list.extend(forecast_dates.tolist())
         
-        all_dates = sorted(set(all_dates_list))
+        # For yearly frequency, group dates by year and create representative dates
+        if not is_monthly:
+            # Group by year
+            dates_by_year = {}
+            for date in all_dates_list:
+                year = date.year
+                if year not in dates_by_year:
+                    dates_by_year[year] = []
+                dates_by_year[year].append(date)
+            
+            # Create one date per year (use January 1st as representative)
+            all_dates = sorted([pd.Timestamp(year, 1, 1) for year in dates_by_year.keys()])
+        else:
+            all_dates = sorted(set(all_dates_list))
         
         if not all_dates:
             return  # Skip if no dates
@@ -4130,13 +4132,82 @@ class DeclineCurveApp(QMainWindow):
                             t = last_t + months_ahead
                             
                             forecast_value = arps_hyperbolic(t, qi, Di, b)
-                            ws.cell(row + 1, col, max(0, forecast_value))
+                            
+                            # Apply forecast adjustments if needed (avg_points or offset)
+                            if forecast_avg_points > 1:
+                                # Get last n points from data for adjustment
+                                data_df = analysis_info['data'].sort_values('Prod_Date')
+                                n_points = min(forecast_avg_points, len(data_df))
+                                if n_points > 0:
+                                    last_rates = data_df['oil_prod_daily'].tail(n_points).values
+                                    actual_avg = np.mean(last_rates)
+                                    fitted_rate = arps_hyperbolic(last_t, qi, Di, b)
+                                    adjustment = actual_avg - fitted_rate
+                                    forecast_value = max(0, forecast_value + adjustment)
+                            elif forecast_avg_points == 1:
+                                # Use last historical rate
+                                data_df = analysis_info['data'].sort_values('Prod_Date')
+                                if len(data_df) > 0:
+                                    last_rate = data_df['oil_prod_daily'].iloc[-1]
+                                    fitted_rate = arps_hyperbolic(last_t, qi, Di, b)
+                                    adjustment = last_rate - fitted_rate
+                                    forecast_value = max(0, forecast_value + adjustment)
+                            
+                            # For yearly frequency, calculate average for all months in that year
+                            if not is_monthly:
+                                # Calculate value for all future months in this year and average
+                                year_values = []
+                                for month in range(1, 13):
+                                    month_date = pd.Timestamp(date.year, month, 1)
+                                    
+                                    # Only forecast months that are after last_date
+                                    if month_date <= last_date:
+                                        continue
+                                    
+                                    # Calculate months ahead for this month
+                                    months_ahead_month = (month_date.year - last_date.year) * 12 + (month_date.month - last_date.month)
+                                    t_month = last_t + months_ahead_month
+                                    forecast_value_month = arps_hyperbolic(t_month, qi, Di, b)
+                                    
+                                    # Apply adjustments if needed
+                                    if forecast_avg_points > 1:
+                                        data_df = analysis_info['data'].sort_values('Prod_Date')
+                                        n_points = min(forecast_avg_points, len(data_df))
+                                        if n_points > 0:
+                                            last_rates = data_df['oil_prod_daily'].tail(n_points).values
+                                            actual_avg = np.mean(last_rates)
+                                            fitted_rate = arps_hyperbolic(last_t, qi, Di, b)
+                                            adjustment = actual_avg - fitted_rate
+                                            forecast_value_month = max(0, forecast_value_month + adjustment)
+                                    elif forecast_avg_points == 1:
+                                        data_df = analysis_info['data'].sort_values('Prod_Date')
+                                        if len(data_df) > 0:
+                                            last_rate = data_df['oil_prod_daily'].iloc[-1]
+                                            fitted_rate = arps_hyperbolic(last_t, qi, Di, b)
+                                            adjustment = last_rate - fitted_rate
+                                            forecast_value_month = max(0, forecast_value_month + adjustment)
+                                    
+                                    year_values.append(forecast_value_month)
+                                
+                                if year_values:
+                                    forecast_value = np.mean(year_values)
+                            
+                            ws.cell(row + 1, col, forecast_value)
                     elif not is_forecast and export_history:
                         # Use actual production data
                         analysis_data = analysis_info['data']
-                        matching_row = analysis_data[analysis_data['Prod_Date'] == date]
-                        if not matching_row.empty:
-                            ws.cell(row + 1, col, matching_row.iloc[0]['oil_prod_daily'])
+                        
+                        if is_monthly:
+                            # For monthly, match exact date
+                            matching_row = analysis_data[analysis_data['Prod_Date'] == date]
+                            if not matching_row.empty:
+                                ws.cell(row + 1, col, matching_row.iloc[0]['oil_prod_daily'])
+                        else:
+                            # For yearly, average all months in that year
+                            year_data = analysis_data[analysis_data['Prod_Date'].dt.year == date.year]
+                            if not year_data.empty:
+                                avg_value = year_data['oil_prod_daily'].mean()
+                                ws.cell(row + 1, col, avg_value)
             
             row += 1
         
@@ -4234,7 +4305,19 @@ class DeclineCurveApp(QMainWindow):
             QMessageBox.warning(self, "Warning", "Please select at least one export option (History or Forecast).")
             return
         
-        forecast_duration = int(self.export_forecast_duration_edit.text()) if self.export_forecast_duration_edit.text() else 60
+        # Get forecast parameters from Setup tab
+        forecast_duration = int(self.forecast_duration_edit.text()) if self.forecast_duration_edit.text() else 60
+        forecast_offset = max(0, min(120, int(self.forecast_offset_edit.text()))) if self.forecast_offset_edit.text() else 0
+        
+        # Convert forecast_avg_points combo selection to integer value
+        forecast_avg_text = self.forecast_avg_points_combo.currentText()
+        if forecast_avg_text == "The Model":
+            forecast_avg_points = 0
+        elif forecast_avg_text == "The Last Rate":
+            forecast_avg_points = 1
+        else:
+            forecast_avg_points = int(forecast_avg_text)
+        
         is_monthly = self.monthly_radio.isChecked()
         include_summary = self.include_summary_check.isChecked()
         
@@ -4314,19 +4397,18 @@ class DeclineCurveApp(QMainWindow):
             # Create sheet for aggregated analyses first (if any)
             if aggregated_data:
                 # Create "Aggregated" sheet
-                self.create_export_sheet(wb, "Aggregated", aggregated_data, export_history, export_forecast, forecast_duration, is_monthly)
+                self.create_export_sheet(wb, "Aggregated", aggregated_data, export_history, export_forecast, forecast_duration, is_monthly, forecast_avg_points, forecast_offset)
             
             # Create sheets for each field with single-well analyses only
             for field_name, analysis_dict in sorted(field_data.items()):
-                self.create_export_sheet(wb, field_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly)
+                self.create_export_sheet(wb, field_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly, forecast_avg_points, forecast_offset)
             
             # Create summary sheet if requested
             if include_summary:
                 summary_ws = wb.create_sheet(title="Summary", index=0)
                 
                 # Summary header with decline percentages
-                headers = ['Well Name', 'District', 'Field', 'Formation', 'qi', 'Di', 'b', 
-                          'Start Method', 'Start Date', 'Threshold', 'CV',
+                headers = ['Well Name', 'District', 'Field', 'Formation', 
                           'Decline 1Y', 'Decline 2Y', 'Decline 5Y', 'Decline 10Y']
                 
                 for col, header in enumerate(headers, 1):
@@ -4343,40 +4425,6 @@ class DeclineCurveApp(QMainWindow):
                     summary_ws.cell(row, 3, analysis_data.get('field', ''))
                     summary_ws.cell(row, 4, analysis_data.get('formation', ''))
                     
-                    # Extract model parameters from results_text
-                    results_text = analysis_data.get('results_text', '')
-                    qi_val = ''
-                    di_val = ''
-                    b_val = ''
-                    
-                    for line in results_text.split('\n'):
-                        if 'qi =' in line and 'Di =' in line and 'b =' in line:
-                            try:
-                                parts = line.split(',')
-                                qi_val = parts[0].split('=')[1].strip()
-                                di_val = parts[1].split('=')[1].strip()
-                                b_val = parts[2].split('=')[1].strip()
-                            except:
-                                pass
-                    
-                    summary_ws.cell(row, 5, qi_val)
-                    summary_ws.cell(row, 6, di_val)
-                    summary_ws.cell(row, 7, b_val)
-                    summary_ws.cell(row, 8, analysis_data.get('start_method', ''))
-                    summary_ws.cell(row, 9, analysis_data.get('manual_year', '') + '-' + analysis_data.get('manual_month', ''))
-                    summary_ws.cell(row, 10, analysis_data.get('threshold', ''))
-                    
-                    # Extract CV from results_text
-                    cv = ''
-                    for line in results_text.split('\n'):
-                        if 'Coefficient of Variation' in line or 'CV:' in line:
-                            try:
-                                cv = line.split(':')[1].strip()
-                            except:
-                                pass
-                    
-                    summary_ws.cell(row, 11, cv)
-                    
                     # Calculate decline percentages using FITTED MODEL VALUES
                     applied_wells = analysis_data.get('applied_wells', [well_name])
                     
@@ -4386,6 +4434,7 @@ class DeclineCurveApp(QMainWindow):
                     b = None
                     
                     # Try to extract from results text
+                    results_text = analysis_data.get('results_text', '')
                     for line in results_text.split('\n'):
                         if 'qi =' in line and 'Di =' in line and 'b =' in line:
                             try:
@@ -4462,8 +4511,8 @@ class DeclineCurveApp(QMainWindow):
                     else:
                         decline_pcts = ['', '', '', '']
                     
-                    # Write decline percentages
-                    for idx, decline_value in enumerate(decline_pcts, 12):
+                    # Write decline percentages (starting at column 5)
+                    for idx, decline_value in enumerate(decline_pcts, 5):
                         summary_ws.cell(row, idx, decline_value)
                     
                     row += 1
