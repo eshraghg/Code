@@ -144,7 +144,7 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
                      outlier_threshold, forecast_avg_points=1, start_method="", 
                      show_outliers=True, show_pre_decline=True, show_forecast=True, 
                      show_smoothed=False, show_channel=False, forecast_duration=60,
-                     forecast_offset=0, reference_model=None):
+                     reference_model=None):
     if popt is None:
         return None
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -157,7 +157,7 @@ def create_arps_plot(df_well, t, q, mask, popt, well_id, df_full, q_original, q_
     lower_bound = np.maximum(lower_bound, 0)
     last_date = df_well['Prod_Date'].max()
     forecast_months = forecast_duration
-    forecast_dates = pd.date_range(start=last_date + pd.DateOffset(months=1 + int(max(0, forecast_offset))),
+    forecast_dates = pd.date_range(start=last_date + pd.DateOffset(months=1),
                                    periods=forecast_months, freq='MS')
     last_t = t[-1]
     forecast_t = last_t + np.arange(1, forecast_months + 1)
@@ -700,7 +700,7 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
                            auto_start_params=None, filter_params=None,
                            show_outliers=True, show_pre_decline=True, 
                            show_forecast=True, show_smoothed=False, show_channel=False, 
-                           forecast_duration=60, forecast_offset=0, fixed_qi=None,
+                           forecast_duration=60, fixed_qi=None,
                            reference_model=None):
     df_well = df_all[df_all['Well_Name'] == well_name].copy()
     if df_well.empty:
@@ -791,7 +791,7 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
                            q_original_full, q_smoothed_full, outlier_threshold, 
                            forecast_avg_points, start_method,
                            show_outliers, show_pre_decline, show_forecast, 
-                           show_smoothed, show_channel, forecast_duration, forecast_offset,
+                           show_smoothed, show_channel, forecast_duration,
                            reference_model=reference_model)
     
     results = ""
@@ -1360,11 +1360,13 @@ class DeclineCurveApp(QMainWindow):
         self.manual_year_edit = QLineEdit("2020")
         self.manual_year_edit.setMaximumWidth(60)
         self.manual_year_edit.textChanged.connect(self.update_vertical_line_from_inputs)
+        self.manual_year_edit.editingFinished.connect(lambda: self.validate_manual_date())
         manual_date_layout.addWidget(self.manual_year_edit)
         manual_date_layout.addWidget(QLabel("Month:"))
         self.manual_month_edit = QLineEdit("1")
         self.manual_month_edit.setMaximumWidth(40)
         self.manual_month_edit.textChanged.connect(self.update_vertical_line_from_inputs)
+        self.manual_month_edit.editingFinished.connect(lambda: self.validate_manual_date())
         manual_date_layout.addWidget(self.manual_month_edit)
         self.select_start_btn = QPushButton("Select on Chart")
         self.select_start_btn.clicked.connect(self.enable_chart_click_selection)
@@ -1389,11 +1391,13 @@ class DeclineCurveApp(QMainWindow):
         self.qi_year_edit = QLineEdit("2020")
         self.qi_year_edit.setMaximumWidth(60)
         self.qi_year_edit.textChanged.connect(self.update_vertical_line_from_inputs)
+        self.qi_year_edit.editingFinished.connect(lambda: self.validate_qi_date())
         qi_date_layout.addWidget(self.qi_year_edit)
         qi_date_layout.addWidget(QLabel("Month:"))
         self.qi_month_edit = QLineEdit("1")
         self.qi_month_edit.setMaximumWidth(40)
         self.qi_month_edit.textChanged.connect(self.update_vertical_line_from_inputs)
+        self.qi_month_edit.editingFinished.connect(lambda: self.validate_qi_date())
         qi_date_layout.addWidget(self.qi_month_edit)
         qi_date_layout.addStretch()
         qi_layout.addLayout(qi_date_layout)
@@ -1650,7 +1654,6 @@ class DeclineCurveApp(QMainWindow):
             'threshold_opt': self.threshold_opt_check.isChecked(),
             'forecast_avg_points': self.forecast_avg_points_combo.currentText(),
             'forecast_duration': self.forecast_duration_edit.text(),
-            'forecast_offset': self.forecast_offset_edit.text(),
             
             # Auto start parameters
             'smooth_window': self.smooth_window_edit.text(),
@@ -1799,11 +1802,15 @@ class DeclineCurveApp(QMainWindow):
             else:  # qi
                 self.qi_radio.setChecked(True)
             
-            # Set manual dates
+            # Set manual dates (with validation)
             self.manual_year_edit.setText(data.get('manual_year', '2020'))
             self.manual_month_edit.setText(data.get('manual_month', '1'))
+            self.validate_manual_date()  # Validate and correct if needed
+            
             self.qi_year_edit.setText(data.get('qi_year', '2020'))
             self.qi_month_edit.setText(data.get('qi_month', '1'))
+            self.validate_qi_date()  # Validate and correct if needed
+            
             self.qi_value_edit.setText(data.get('qi_value', ''))
             self.fixed_qi = data.get('fixed_qi')
             
@@ -1812,7 +1819,6 @@ class DeclineCurveApp(QMainWindow):
             self.threshold_opt_check.setChecked(data.get('threshold_opt', True))
             self.forecast_avg_points_combo.setCurrentText(data.get('forecast_avg_points', 'The Model'))
             self.forecast_duration_edit.setText(data.get('forecast_duration', '60'))
-            self.forecast_offset_edit.setText(data.get('forecast_offset', '0'))
             
             # Set auto start parameters
             self.smooth_window_edit.setText(data.get('smooth_window', '13'))
@@ -2172,6 +2178,13 @@ class DeclineCurveApp(QMainWindow):
                 QMessageBox.information(self, "Success", 
                                        f"Successfully loaded {loaded_count} analysis/analyses into session!{ref_msg}\n\n"
                                        f"Select wells from the tree and apply to view loaded analyses.")
+            
+            # Automatically show the analyses list and update export tab
+            self.show_analyses_list()
+            
+            # Update the analysis list in the export tab
+            if hasattr(self, 'analysis_list'):
+                self.update_analysis_list_for_export()
         
         except json.JSONDecodeError as e:
             QMessageBox.critical(self, "Error", f"Invalid JSON file: {str(e)}")
@@ -2461,6 +2474,73 @@ class DeclineCurveApp(QMainWindow):
                 pass  # Line may have already been removed
             self.vertical_line = None
     
+    def get_well_date_range(self):
+        """Get the minimum and maximum dates for the current well"""
+        if self.current_well_name is None:
+            return None, None
+        
+        # Get the appropriate well data
+        df_well = self._get_well_data_for_selection()
+        if df_well is None or len(df_well) == 0:
+            return None, None
+        
+        df_well['Prod_Date'] = pd.to_datetime(df_well['Prod_Date'])
+        min_date = df_well['Prod_Date'].min()
+        max_date = df_well['Prod_Date'].max()
+        
+        return min_date, max_date
+    
+    def validate_and_correct_date(self, year, month, is_qi=False):
+        """Validate and correct date to be within well data range"""
+        min_date, max_date = self.get_well_date_range()
+        if min_date is None or max_date is None:
+            return year, month  # Can't validate without data
+        
+        try:
+            input_date = pd.Timestamp(year=int(year), month=int(month), day=1)
+            
+            # Clamp to valid range
+            if input_date < min_date:
+                return min_date.year, min_date.month
+            elif input_date > max_date:
+                return max_date.year, max_date.month
+            else:
+                return int(year), int(month)
+        except (ValueError, TypeError):
+            # Invalid input, return nearest valid date
+            if min_date is not None:
+                return min_date.year, min_date.month
+            else:
+                return int(year) if year.isdigit() else 2000, int(month) if month.isdigit() else 1
+    
+    def validate_manual_date(self):
+        """Validate and correct manual date input"""
+        try:
+            year = self.manual_year_edit.text()
+            month = self.manual_month_edit.text()
+            corrected_year, corrected_month = self.validate_and_correct_date(year, month, is_qi=False)
+            
+            # Update if corrected
+            if str(corrected_year) != year or str(corrected_month) != month:
+                self.manual_year_edit.setText(str(corrected_year))
+                self.manual_month_edit.setText(str(corrected_month))
+        except:
+            pass  # Silently ignore errors during typing
+    
+    def validate_qi_date(self):
+        """Validate and correct qi date input"""
+        try:
+            year = self.qi_year_edit.text()
+            month = self.qi_month_edit.text()
+            corrected_year, corrected_month = self.validate_and_correct_date(year, month, is_qi=True)
+            
+            # Update if corrected
+            if str(corrected_year) != year or str(corrected_month) != month:
+                self.qi_year_edit.setText(str(corrected_year))
+                self.qi_month_edit.setText(str(corrected_month))
+        except:
+            pass  # Silently ignore errors during typing
+    
     def update_vertical_line_from_inputs(self):
         """Add or update vertical line based on current manual date inputs"""
         if self.figure is None or self.canvas is None:
@@ -2528,6 +2608,15 @@ class DeclineCurveApp(QMainWindow):
             return
         
         df_well['Prod_Date'] = pd.to_datetime(df_well['Prod_Date'])
+        min_date = df_well['Prod_Date'].min()
+        max_date = df_well['Prod_Date'].max()
+        
+        # Validate date is within range
+        if date_clicked < min_date:
+            date_clicked = min_date
+        elif date_clicked > max_date:
+            date_clicked = max_date
+        
         df_well = df_well.sort_values('Prod_Date')
         idx = np.searchsorted(df_well['Prod_Date'], date_clicked)
         if idx >= len(df_well):
@@ -2570,6 +2659,15 @@ class DeclineCurveApp(QMainWindow):
             return
         
         df_well['Prod_Date'] = pd.to_datetime(df_well['Prod_Date'])
+        min_date = df_well['Prod_Date'].min()
+        max_date = df_well['Prod_Date'].max()
+        
+        # Validate date is within range
+        if date_clicked < min_date:
+            date_clicked = min_date
+        elif date_clicked > max_date:
+            date_clicked = max_date
+        
         df_well = df_well.sort_values('Prod_Date')
         idx = np.searchsorted(df_well['Prod_Date'], date_clicked)
         if idx >= len(df_well):
@@ -2678,21 +2776,6 @@ class DeclineCurveApp(QMainWindow):
         row3.addWidget(self.forecast_duration_edit)
         row3.addStretch()
         main_layout.addLayout(row3)
-        
-        # Row 4 - Forecast Offset
-        row4 = QHBoxLayout()
-        row4.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        spacer4 = QLabel("")
-        spacer4.setFixedWidth(checkbox_width)
-        row4.addWidget(spacer4)
-        label4 = QLabel("Forecast Offset (months):")
-        label4.setFixedWidth(label_width)
-        row4.addWidget(label4)
-        self.forecast_offset_edit = QLineEdit("0")
-        self.forecast_offset_edit.setMaximumWidth(100)
-        row4.addWidget(self.forecast_offset_edit)
-        row4.addStretch()
-        main_layout.addLayout(row4)
         
         main_layout.addStretch()
         self.settings_tabs.addTab(general_tab, "General")
@@ -2835,6 +2918,29 @@ class DeclineCurveApp(QMainWindow):
         self.analysis_list = QListWidget()
         self.analysis_list.setMaximumHeight(150)
         self.analysis_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        # Apply better selection styling
+        self.analysis_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                background-color: white;
+            }
+            QListWidget::item {
+                padding: 5px;
+                border-bottom: 1px solid #e0e0e0;
+            }
+            QListWidget::item:selected {
+                background-color: #4A90E2;
+                color: white;
+                border: none;
+            }
+            QListWidget::item:hover {
+                background-color: #f0f0f0;
+            }
+            QListWidget::item:selected:hover {
+                background-color: #3a7bc8;
+            }
+        """)
         analysis_layout.addWidget(QLabel("Select analyses to export:"))
         analysis_layout.addWidget(self.analysis_list)
         
@@ -2879,7 +2985,7 @@ class DeclineCurveApp(QMainWindow):
         duration_layout.addWidget(self.export_history_check)
         
         self.export_forecast_check = QCheckBox("Forecast")
-        self.export_forecast_check.setChecked(False)
+        self.export_forecast_check.setChecked(True)
         duration_layout.addWidget(self.export_forecast_check)
         
         duration_group.setLayout(duration_layout)
@@ -2901,6 +3007,39 @@ class DeclineCurveApp(QMainWindow):
         
         frequency_group.setLayout(frequency_layout)
         layout.addWidget(frequency_group)
+        
+        # Forecast Start Date group
+        fsd_group = QGroupBox("Forecast Start Date")
+        fsd_layout = QVBoxLayout()
+        
+        self.fsd_mode_group = QButtonGroup()
+        self.fsd_auto_radio = QRadioButton("Auto (month after last history for each analysis)")
+        self.fsd_auto_radio.setChecked(True)
+        self.fsd_fixed_radio = QRadioButton("Fixed date (same for all analyses)")
+        self.fsd_mode_group.addButton(self.fsd_auto_radio, 0)
+        self.fsd_mode_group.addButton(self.fsd_fixed_radio, 1)
+        
+        fsd_layout.addWidget(self.fsd_auto_radio)
+        
+        # Fixed date layout
+        fixed_date_layout = QHBoxLayout()
+        fixed_date_layout.addWidget(self.fsd_fixed_radio)
+        
+        # Add date input (disabled by default)
+        self.fsd_date_edit = QLineEdit()
+        self.fsd_date_edit.setPlaceholderText("YYYY-MM-DD")
+        self.fsd_date_edit.setEnabled(False)
+        self.fsd_date_edit.setMaximumWidth(150)
+        fixed_date_layout.addWidget(self.fsd_date_edit)
+        fixed_date_layout.addStretch()
+        
+        fsd_layout.addLayout(fixed_date_layout)
+        
+        # Connect radio button to enable/disable date edit
+        self.fsd_fixed_radio.toggled.connect(self.fsd_date_edit.setEnabled)
+        
+        fsd_group.setLayout(fsd_layout)
+        layout.addWidget(fsd_group)
         
         # Include summary checkbox
         self.include_summary_check = QCheckBox("Include Summary Page")
@@ -3101,8 +3240,6 @@ class DeclineCurveApp(QMainWindow):
                 if selected_ref != "-- No Reference --" and selected_ref in self.reference_models:
                     reference_model = self.reference_models[selected_ref]
             
-            current_offset = max(0, min(120, int(self.forecast_offset_edit.text())))
-            
             # Check if we're in aggregated mode and use appropriate data
             if len(self.applied_wells) > 1 and self.df_aggregated_cache is not None:
                 df_to_use = self.df_aggregated_cache
@@ -3126,7 +3263,6 @@ class DeclineCurveApp(QMainWindow):
                 show_smoothed=show_smoothed,
                 show_channel=show_channel,
                 forecast_duration=self.current_analysis_params.get('forecast_duration', 60),
-                forecast_offset=current_offset,
                 fixed_qi=getattr(self, 'fixed_qi', None),
                 reference_model=reference_model
             )
@@ -3390,7 +3526,6 @@ class DeclineCurveApp(QMainWindow):
         self.threshold_opt_check.setChecked(True)
         self.forecast_avg_points_combo.setCurrentText("The Model")
         self.forecast_duration_edit.setText("60")
-        self.forecast_offset_edit.setText("0")
         
         # Reset auto start detection parameters to defaults
         self.smooth_window_edit.setText("13")
@@ -3714,7 +3849,6 @@ class DeclineCurveApp(QMainWindow):
             forecast_avg_points = int(forecast_avg_text)
         
         forecast_duration = int(self.forecast_duration_edit.text())
-        forecast_offset = max(0, min(120, int(self.forecast_offset_edit.text())))
 
         filter_params = {'threshold': float(self.threshold_edit.text())}
         auto_start_params = {
@@ -3845,7 +3979,6 @@ class DeclineCurveApp(QMainWindow):
                     show_outliers=show_outliers, show_pre_decline=show_pre_decline,
                     show_forecast=show_forecast, show_smoothed=show_smoothed,
                     show_channel=show_channel, forecast_duration=forecast_duration,
-                    forecast_offset=forecast_offset,
                     fixed_qi=self.fixed_qi if start_method == "Manual Start Date and Initial Rate (Qi)" else None,
                     reference_model=reference_model
                 )
@@ -3859,7 +3992,6 @@ class DeclineCurveApp(QMainWindow):
                     show_outliers=show_outliers, show_pre_decline=show_pre_decline,
                     show_forecast=show_forecast, show_smoothed=show_smoothed,
                     show_channel=show_channel, forecast_duration=forecast_duration,
-                    forecast_offset=forecast_offset,
                     fixed_qi=self.fixed_qi if start_method == "Manual Start Date and Initial Rate (Qi)" else None,
                     reference_model=reference_model
                 )
@@ -3876,7 +4008,6 @@ class DeclineCurveApp(QMainWindow):
                     show_outliers=show_outliers, show_pre_decline=show_pre_decline,
                     show_forecast=show_forecast, show_smoothed=show_smoothed,
                     show_channel=show_channel, forecast_duration=forecast_duration,
-                    forecast_offset=forecast_offset,
                     fixed_qi=None,
                     reference_model=reference_model
                 )
@@ -3890,7 +4021,6 @@ class DeclineCurveApp(QMainWindow):
                     show_outliers=show_outliers, show_pre_decline=show_pre_decline,
                     show_forecast=show_forecast, show_smoothed=show_smoothed,
                     show_channel=show_channel, forecast_duration=forecast_duration,
-                    forecast_offset=forecast_offset,
                     fixed_qi=self.fixed_qi if start_method == "Manual Start Date and Initial Rate (Qi)" else None,
                     reference_model=reference_model
                 )
@@ -3914,8 +4044,7 @@ class DeclineCurveApp(QMainWindow):
                 'start_method': method_label if 'method_label' in locals() else start_method,
                 'auto_start_params': auto_start_params,
                 'filter_params': filter_params,
-                'forecast_duration': forecast_duration,
-                'forecast_offset': forecast_offset
+                'forecast_duration': forecast_duration
             }
             
             # Redraw vertical line if in manual mode
@@ -3966,7 +4095,7 @@ class DeclineCurveApp(QMainWindow):
         else:
             QMessageBox.critical(self, "Error", results)
     
-    def create_export_sheet(self, wb, sheet_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly, forecast_avg_points=0, forecast_offset=0):
+    def create_export_sheet(self, wb, sheet_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly, use_auto_fsd=True, fixed_fsd_date=None):
         """Helper method to create an export sheet for analyses"""
         # Group analyses by formation
         formation_groups = {}
@@ -4014,8 +4143,17 @@ class DeclineCurveApp(QMainWindow):
                     if qi is not None and Di is not None and b is not None:
                         # Generate forecast dates
                         max_date = analysis_info['data']['Prod_Date'].max()
+                        
+                        # Determine forecast start date (fsd)
+                        if use_auto_fsd:
+                            # Use auto: month after last history point for each analysis
+                            fsd = max_date + pd.DateOffset(months=1)
+                        else:
+                            # Use fixed fsd for all analyses
+                            fsd = fixed_fsd_date
+                        
                         forecast_dates = pd.date_range(
-                            start=max_date + pd.DateOffset(months=1),
+                            start=fsd,
                             periods=forecast_duration,
                             freq='MS'
                         )
@@ -4110,8 +4248,21 @@ class DeclineCurveApp(QMainWindow):
                                         pass
                         
                         if qi is not None and Di is not None and b is not None:
+                            # Extract forecast_avg_points for this specific analysis
+                            analysis_data = analysis_info['analysis']
+                            forecast_avg_text = analysis_data.get('forecast_avg_points', 'The Model')
+                            if forecast_avg_text == "The Model":
+                                analysis_forecast_avg_points = 0
+                            elif forecast_avg_text == "The Last Rate":
+                                analysis_forecast_avg_points = 1
+                            else:
+                                try:
+                                    analysis_forecast_avg_points = int(forecast_avg_text)
+                                except:
+                                    analysis_forecast_avg_points = 0
+                            
                             # Get the EXACT decline start date from analysis
-                            decline_start = analysis_info['analysis'].get('decline_start_date')
+                            decline_start = analysis_data.get('decline_start_date')
                             if decline_start:
                                 decline_start = pd.to_datetime(decline_start)
                             else:
@@ -4126,25 +4277,41 @@ class DeclineCurveApp(QMainWindow):
                             last_t = (last_date.year - decline_start.year) * 12 + (last_date.month - decline_start.month)
                             
                             # Calculate months ahead from last date
-                            months_ahead = (date.year - last_date.year) * 12 + (date.month - last_date.month)
+                            if not use_auto_fsd and fixed_fsd_date is not None:
+                                # Using fixed fsd - treat any gap as a single timestep
+                                gap_months = ((fixed_fsd_date.year - last_date.year) * 12 + 
+                                            (fixed_fsd_date.month - last_date.month))
+                                if gap_months > 1:
+                                    # There's a gap - treat it as 1 timestep
+                                    months_from_fsd = ((date.year - fixed_fsd_date.year) * 12 + 
+                                                      (date.month - fixed_fsd_date.month))
+                                    months_ahead = 1 + max(0, months_from_fsd)
+                                else:
+                                    # No gap or small gap - normal calculation
+                                    months_ahead = (date.year - last_date.year) * 12 + (date.month - last_date.month)
+                            else:
+                                # Using auto fsd - normal calculation
+                                months_ahead = (date.year - last_date.year) * 12 + (date.month - last_date.month)
                             
-                            # For forecast: t = last_t + months_ahead (exactly as in create_arps_plot)
+                            months_ahead = max(0, months_ahead)  # Ensure t continues from history
+                            
+                            # For forecast: t = last_t + months_ahead
                             t = last_t + months_ahead
                             
                             forecast_value = arps_hyperbolic(t, qi, Di, b)
                             
-                            # Apply forecast adjustments if needed (avg_points or offset)
-                            if forecast_avg_points > 1:
+                            # Apply forecast adjustments if needed (avg_points)
+                            if analysis_forecast_avg_points > 1:
                                 # Get last n points from data for adjustment
                                 data_df = analysis_info['data'].sort_values('Prod_Date')
-                                n_points = min(forecast_avg_points, len(data_df))
+                                n_points = min(analysis_forecast_avg_points, len(data_df))
                                 if n_points > 0:
                                     last_rates = data_df['oil_prod_daily'].tail(n_points).values
                                     actual_avg = np.mean(last_rates)
                                     fitted_rate = arps_hyperbolic(last_t, qi, Di, b)
                                     adjustment = actual_avg - fitted_rate
                                     forecast_value = max(0, forecast_value + adjustment)
-                            elif forecast_avg_points == 1:
+                            elif analysis_forecast_avg_points == 1:
                                 # Use last historical rate
                                 data_df = analysis_info['data'].sort_values('Prod_Date')
                                 if len(data_df) > 0:
@@ -4164,22 +4331,37 @@ class DeclineCurveApp(QMainWindow):
                                     if month_date <= last_date:
                                         continue
                                     
-                                    # Calculate months ahead for this month
-                                    months_ahead_month = (month_date.year - last_date.year) * 12 + (month_date.month - last_date.month)
+                                    # Calculate months ahead for this month (with gap handling for fixed fsd)
+                                    if not use_auto_fsd and fixed_fsd_date is not None:
+                                        gap_months = ((fixed_fsd_date.year - last_date.year) * 12 + 
+                                                    (fixed_fsd_date.month - last_date.month))
+                                        if gap_months > 1:
+                                            # There's a gap - treat it as 1 timestep
+                                            months_from_fsd = ((month_date.year - fixed_fsd_date.year) * 12 + 
+                                                              (month_date.month - fixed_fsd_date.month))
+                                            months_ahead_month = 1 + max(0, months_from_fsd)
+                                        else:
+                                            # No gap or small gap - normal calculation
+                                            months_ahead_month = (month_date.year - last_date.year) * 12 + (month_date.month - last_date.month)
+                                    else:
+                                        # Using auto fsd - normal calculation
+                                        months_ahead_month = (month_date.year - last_date.year) * 12 + (month_date.month - last_date.month)
+                                    
+                                    months_ahead_month = max(0, months_ahead_month)  # Ensure t continues from history
                                     t_month = last_t + months_ahead_month
                                     forecast_value_month = arps_hyperbolic(t_month, qi, Di, b)
                                     
                                     # Apply adjustments if needed
-                                    if forecast_avg_points > 1:
+                                    if analysis_forecast_avg_points > 1:
                                         data_df = analysis_info['data'].sort_values('Prod_Date')
-                                        n_points = min(forecast_avg_points, len(data_df))
+                                        n_points = min(analysis_forecast_avg_points, len(data_df))
                                         if n_points > 0:
                                             last_rates = data_df['oil_prod_daily'].tail(n_points).values
                                             actual_avg = np.mean(last_rates)
                                             fitted_rate = arps_hyperbolic(last_t, qi, Di, b)
                                             adjustment = actual_avg - fitted_rate
                                             forecast_value_month = max(0, forecast_value_month + adjustment)
-                                    elif forecast_avg_points == 1:
+                                    elif analysis_forecast_avg_points == 1:
                                         data_df = analysis_info['data'].sort_values('Prod_Date')
                                         if len(data_df) > 0:
                                             last_rate = data_df['oil_prod_daily'].iloc[-1]
@@ -4254,23 +4436,27 @@ class DeclineCurveApp(QMainWindow):
         """Update the analysis list when exports tab is opened"""
         # Only update if we're on the exports tab (index 2: Analysis, Setup, Exports)
         if index == 2:  # Exports tab
-            self.analysis_list.clear()
+            self.update_analysis_list_for_export()
+    
+    def update_analysis_list_for_export(self):
+        """Update the analysis list in the export tab"""
+        self.analysis_list.clear()
+        
+        # Populate with available analyses
+        for well_name, data in sorted(self.session_analyses.items()):
+            applied_wells = data.get('applied_wells', [well_name])
+            hierarchy_name = self._build_selection_title(applied_wells)
             
-            # Populate with available analyses
-            for well_name, data in sorted(self.session_analyses.items()):
-                applied_wells = data.get('applied_wells', [well_name])
-                hierarchy_name = self._build_selection_title(applied_wells)
-                
-                # Add item to list
-                self.analysis_list.addItem(hierarchy_name)
-                
-                # Get the item we just added and configure it
-                item = self.analysis_list.item(self.analysis_list.count() - 1)
-                # Store well_name as item data
-                item.setData(Qt.ItemDataRole.UserRole, well_name)
-                
-                # Select all by default
-                item.setSelected(True)
+            # Add item to list
+            self.analysis_list.addItem(hierarchy_name)
+            
+            # Get the item we just added and configure it
+            item = self.analysis_list.item(self.analysis_list.count() - 1)
+            # Store well_name as item data
+            item.setData(Qt.ItemDataRole.UserRole, well_name)
+            
+            # Select all by default
+            item.setSelected(True)
     
     def select_all_analyses(self):
         """Select all analyses in the list"""
@@ -4307,16 +4493,18 @@ class DeclineCurveApp(QMainWindow):
         
         # Get forecast parameters from Setup tab
         forecast_duration = int(self.forecast_duration_edit.text()) if self.forecast_duration_edit.text() else 60
-        forecast_offset = max(0, min(120, int(self.forecast_offset_edit.text()))) if self.forecast_offset_edit.text() else 0
         
-        # Convert forecast_avg_points combo selection to integer value
-        forecast_avg_text = self.forecast_avg_points_combo.currentText()
-        if forecast_avg_text == "The Model":
-            forecast_avg_points = 0
-        elif forecast_avg_text == "The Last Rate":
-            forecast_avg_points = 1
-        else:
-            forecast_avg_points = int(forecast_avg_text)
+        # Get forecast start date (fsd) settings from Export tab
+        use_auto_fsd = self.fsd_auto_radio.isChecked()
+        fixed_fsd_date = None
+        if not use_auto_fsd:
+            fsd_text = self.fsd_date_edit.text()
+            if fsd_text:
+                try:
+                    fixed_fsd_date = pd.to_datetime(fsd_text)
+                except:
+                    QMessageBox.warning(self, "Warning", "Invalid date format. Using auto fsd for all analyses.")
+                    use_auto_fsd = True
         
         is_monthly = self.monthly_radio.isChecked()
         include_summary = self.include_summary_check.isChecked()
@@ -4397,11 +4585,11 @@ class DeclineCurveApp(QMainWindow):
             # Create sheet for aggregated analyses first (if any)
             if aggregated_data:
                 # Create "Aggregated" sheet
-                self.create_export_sheet(wb, "Aggregated", aggregated_data, export_history, export_forecast, forecast_duration, is_monthly, forecast_avg_points, forecast_offset)
+                self.create_export_sheet(wb, "Aggregated", aggregated_data, export_history, export_forecast, forecast_duration, is_monthly, use_auto_fsd, fixed_fsd_date)
             
             # Create sheets for each field with single-well analyses only
             for field_name, analysis_dict in sorted(field_data.items()):
-                self.create_export_sheet(wb, field_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly, forecast_avg_points, forecast_offset)
+                self.create_export_sheet(wb, field_name, analysis_dict, export_history, export_forecast, forecast_duration, is_monthly, use_auto_fsd, fixed_fsd_date)
             
             # Create summary sheet if requested
             if include_summary:
