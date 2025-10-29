@@ -6,4 +6,5 @@ scipy>=1.10.0
 bayesian-optimization>=1.4.0
 qtawesome>=1.2.0
 openpyxl>=3.1.0
+ollama>=0.1.0
 
