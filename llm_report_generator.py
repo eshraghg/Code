@@ -308,7 +308,7 @@ Format the report professionally with clear sections. Use technical terminology 
             error_msg += "3. Check your internet connection (for first-time model downloads)\n"
             error_msg += f"4. Error details: {traceback.format_exc()}"
             return error_msg
-    
+
     def test_connection(self):
         """
         Test connection to Ollama and model availability

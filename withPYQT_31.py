@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QMessageBox, QSplitter, QFrame, QListWidget, QListWidgetItem, QDialog, QDialogButtonBox,
                              QSizePolicy, QTreeWidget, QTreeWidgetItem, QStyleFactory, QFileDialog,
                              QInputDialog, QMenuBar, QMenu)
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QTimer, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QTimer
 from PyQt6.QtGui import QFont, QPalette, QColor, QCursor, QIcon, QAction
 import qtawesome as qta
 import sys
@@ -37,14 +37,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-
-# LLM Report Generator
-try:
-    from llm_report_generator import LLMReportGenerator
-    LLM_AVAILABLE = True
-except ImportError:
-    LLM_AVAILABLE = False
-    print("Warning: LLM report generator not available. Install ollama package to enable.")
+from llm_report_generator import LLMReportGenerator
 
 # Default parameter ranges for optimization
 DEFAULT_FILTER_RANGES = {
@@ -886,29 +879,6 @@ def run_arps_for_well_auto(df_all, well_name, outlier_threshold=2,
     
     return fig, results, model_data
 
-# =========================================================================
-# LLM REPORT GENERATION WORKER (QThread)
-# =========================================================================
-
-class LLMReportWorker(QThread):
-    """Worker thread for generating LLM reports asynchronously"""
-    report_generated = pyqtSignal(str)  # Signal emitted when report is ready
-    error_occurred = pyqtSignal(str)   # Signal emitted on error
-    
-    def __init__(self, llm_generator, analysis_data):
-        super().__init__()
-        self.llm_generator = llm_generator
-        self.analysis_data = analysis_data
-    
-    def run(self):
-        """Generate report in background thread"""
-        try:
-            report = self.llm_generator.generate_report(self.analysis_data)
-            self.report_generated.emit(report)
-        except Exception as e:
-            error_msg = f"Error generating report: {str(e)}"
-            self.error_occurred.emit(error_msg)
-
 class DeclineCurveApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1227,6 +1197,9 @@ class DeclineCurveApp(QMainWindow):
         self.filter_ranges = DEFAULT_FILTER_RANGES.copy()
         self.auto_start_ranges = DEFAULT_AUTO_START_RANGES.copy()
         
+        # Initialize LLM Report Generator
+        self.llm_generator = LLMReportGenerator(model_name="llama3.2:3b")
+        
         # Session storage for all well analyses
         self.session_analyses = {}  # Key: well_name, Value: analysis data dict
         self.saved_analyses = {}  # Track which analyses have been saved (well_name -> True/False)
@@ -1256,15 +1229,6 @@ class DeclineCurveApp(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
             sys.exit(1)
             return
-
-        # Initialize LLM generator early (before create_report_tab is called)
-        self.llm_generator = None
-        self.llm_report_worker = None
-        if LLM_AVAILABLE:
-            try:
-                self.llm_generator = LLMReportGenerator(model_name="llama3.2:3b")
-            except Exception as e:
-                print(f"Warning: Could not initialize LLM generator: {e}")
 
         # Create menu bar
         self.create_menu_bar()
@@ -1300,8 +1264,8 @@ class DeclineCurveApp(QMainWindow):
         # Exports Tab
         self.create_exports_tab()
         
-        # LLM Report Tab
-        self.create_report_tab()
+        # AI Report Tab
+        self.create_ai_report_tab()
         
         # Chart frame (expanded to fill right side)
         self.canvas_frame = QWidget()
@@ -1332,10 +1296,7 @@ class DeclineCurveApp(QMainWindow):
         self.toolbar = None
         self.current_analysis_params = None
         self.current_well_name = None
-        self.current_model_data = None  # Store current model_data for LLM reports
-        self.current_reference_models = None  # Store current reference models
         self.click_selection_enabled = False
-        
         self._loading_analysis = False  # Flag to prevent signal handlers during loading
         self.qi_selection_enabled = False
         self.click_cid = None
@@ -1881,6 +1842,16 @@ class DeclineCurveApp(QMainWindow):
                     if len(df_temp) > 0:
                         data['decline_start_date'] = df_temp.iloc[0]['Prod_Date'].isoformat()
         
+        # If we have cached model_data in the current session, include it so loads can restore without re-running
+        try:
+            analysis_key = self._get_analysis_key(self.applied_wells) if hasattr(self, 'applied_wells') and self.applied_wells else well_name
+            if hasattr(self, 'session_analyses') and analysis_key in self.session_analyses:
+                session_data = self.session_analyses[analysis_key]
+                if 'model_data' in session_data and session_data['model_data'] is not None:
+                    data['model_data'] = session_data['model_data']
+        except Exception:
+            pass
+
         # Save to file
         try:
             with open(filepath, 'w') as f:
@@ -2012,6 +1983,232 @@ class DeclineCurveApp(QMainWindow):
             # Clear loading flag
             self._loading_analysis = False
     
+    def restore_plot_from_params(self, data):
+        """Restore plot using saved qi/Di/b and parameters without re-running optimization."""
+        try:
+            # Ensure required params exist
+            if 'qi' not in data or 'Di' not in data or 'b' not in data:
+                return False
+            qi = float(data['qi'])
+            Di = float(data['Di'])
+            b = float(data['b'])
+
+            # Determine which dataframe to use (aggregated or single)
+            if len(self.applied_wells) > 1 and self.df_aggregated_cache is not None:
+                df_source = self.df_aggregated_cache
+                well_name_to_use = self.df_aggregated_cache['Well_Name'].iloc[0]
+            else:
+                df_source = self.df_all
+                well_name_to_use = data.get('well_name', self.current_well_name)
+
+            df_well = df_source[df_source['Well_Name'] == well_name_to_use].copy()
+            if df_well.empty:
+                return False
+            df_well['Prod_Date'] = pd.to_datetime(df_well['Prod_Date'])
+            df_well = df_well.sort_values('Prod_Date')
+
+            # Derive start index from saved analysis_params if available
+            start_idx = 0
+            analysis_params = data.get('analysis_params', {}) or {}
+            try:
+                start_idx = int(analysis_params.get('manual_start_idx', 0) or 0)
+            except Exception:
+                start_idx = 0
+            if start_idx < 0:
+                start_idx = 0
+            if start_idx >= len(df_well):
+                start_idx = max(0, len(df_well) - 1)
+
+            # Build full original and smoothed arrays (use original as smoothed fallback)
+            q_original_full = df_well['oil_prod_daily'].astype(float).values
+            q_smoothed_full = q_original_full
+
+            # Decline phase series
+            df_well_decline = df_well.iloc[start_idx:].copy()
+            q_decline = df_well_decline['oil_prod_daily'].astype(float).values
+            if len(q_decline) < 3:
+                return False
+            t_decline = np.arange(len(q_decline))
+            mask = np.ones_like(q_decline, dtype=bool)
+            popt = [qi, Di, b]
+
+            # Plot options
+            show_outliers = data.get('show_outliers', True)
+            show_pre_decline = data.get('show_pre_decline', True)
+            show_forecast = data.get('show_forecast', True)
+            show_inliers = data.get('show_inliers', True)
+            show_channel = data.get('show_channel', False)
+            forecast_duration = int(data.get('forecast_duration', analysis_params.get('forecast_duration', 60) or 60))
+
+            # Forecast avg points: prefer current dropdown
+            if hasattr(self, 'forecast_avg_points_combo'):
+                txt = self.forecast_avg_points_combo.currentText()
+                if txt == 'The Model':
+                    forecast_avg_points = 0
+                elif txt == 'The Last Rate':
+                    forecast_avg_points = 1
+                else:
+                    try:
+                        forecast_avg_points = int(txt)
+                    except Exception:
+                        forecast_avg_points = 1
+            else:
+                fav = data.get('forecast_avg_points', 'The Model')
+                if fav == 'The Model':
+                    forecast_avg_points = 0
+                elif fav == 'The Last Rate':
+                    forecast_avg_points = 1
+                else:
+                    try:
+                        forecast_avg_points = int(fav)
+                    except Exception:
+                        forecast_avg_points = 1
+
+            # Reference models as in update_plot_options
+            reference_models = []
+            active_references = data.get('active_references', []) or []
+            for ref_well_name in active_references:
+                ref_data = None
+                if ref_well_name in self.session_analyses:
+                    ref_data = self.session_analyses[ref_well_name]
+                if ref_data and 'Di' in ref_data and 'b' in ref_data:
+                    hierarchy_parts = ref_well_name.split('\\')
+                    if len(hierarchy_parts) >= 3:
+                        display_name = f"{hierarchy_parts[-3]}\\{hierarchy_parts[-2]}\\{hierarchy_parts[-1]}"
+                    else:
+                        display_name = ref_well_name
+                    reference_models.append({'Di': ref_data['Di'], 'b': ref_data['b'], 'name': display_name, 'well_name': ref_well_name})
+
+            # Create full dates frame used by create_arps_plot
+            df_full = pd.DataFrame({'Prod_Date': df_well['Prod_Date']})
+
+            # Build figure
+            well_id = data.get('well_name', 'Unknown')
+            fig = create_arps_plot(
+                df_well_decline, t_decline, q_decline, mask, popt, well_id,
+                df_full, q_original_full, q_smoothed_full,
+                float(data.get('threshold', analysis_params.get('outlier_threshold', 2.0) or 2.0)),
+                forecast_avg_points, analysis_params.get('start_method', ''),
+                show_outliers, show_pre_decline, show_forecast,
+                show_inliers, show_channel, forecast_duration,
+                reference_models=reference_models
+            )
+            if fig is None:
+                return False
+
+            self._display_figure(fig)
+            if self.canvas:
+                self.canvas.draw()
+                QApplication.processEvents()
+
+            # Redraw vertical line if in manual mode
+            self.update_vertical_line_from_inputs()
+
+            # Update title for aggregated wells
+            if hasattr(self, 'applied_wells') and len(self.applied_wells) > 1 and self.figure:
+                title = self._build_selection_title(self.applied_wells)
+                if title and self.figure.axes:
+                    self.figure.axes[0].set_title(title)
+                    if self.canvas:
+                        self.canvas.draw()
+
+            return True
+        except Exception as e:
+            print(f"Error restoring plot from params: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def update_forecast_line_from_model_data(self, analysis_key):
+        """Update only the forecast line using cached model_data and current avg-points selection."""
+        try:
+            if self.figure is None or analysis_key not in self.session_analyses:
+                return False
+            data = self.session_analyses[analysis_key]
+            if 'model_data' not in data or data['model_data'] is None:
+                return False
+            model_data = data['model_data']
+
+            # Reconstruct series from model_data
+            t = np.array(model_data['t'])
+            q = np.array(model_data['q'])
+            mask = np.array(model_data['mask'], dtype=bool)
+            popt = np.array(model_data['popt'])
+            df_well_prod_dates = pd.to_datetime(model_data['df_well_prod_dates'])
+
+            # Forecast parameters
+            forecast_duration = int(data.get('forecast_duration', data.get('analysis_params', {}).get('forecast_duration', 60) or 60))
+
+            # Forecast avg points from current combo
+            txt = self.forecast_avg_points_combo.currentText() if hasattr(self, 'forecast_avg_points_combo') else 'The Model'
+            if txt == 'The Model':
+                forecast_avg_points = 0
+            elif txt == 'The Last Rate':
+                forecast_avg_points = 1
+            else:
+                try:
+                    forecast_avg_points = int(txt)
+                except Exception:
+                    forecast_avg_points = 1
+
+            # Compute forecast dates and values
+            last_date = df_well_prod_dates.max()
+            forecast_months = forecast_duration
+            forecast_dates = pd.date_range(start=last_date + pd.DateOffset(months=1), periods=forecast_months, freq='MS')
+            last_t = t[-1]
+            qi_original, Di, b = popt
+            forecast_t = last_t + np.arange(1, forecast_months + 1)
+
+            def arps_hyperbolic(T, qi, Di_, b_):
+                if abs(b_) < 1e-10:
+                    return qi * np.exp(-Di_ * T)
+                return qi / (1 + b_ * Di_ * T) ** (1 / b_)
+
+            forecast_q = arps_hyperbolic(forecast_t, qi_original, Di, b)
+            fitted_rate_at_last_t = arps_hyperbolic(last_t, qi_original, Di, b)
+            if forecast_avg_points > 1:
+                n_points = min(forecast_avg_points, np.sum(mask))
+                initial_rate = np.mean(q[mask][-n_points:])
+                rate_difference = initial_rate - fitted_rate_at_last_t
+                forecast_q += rate_difference
+                forecast_q = np.maximum(forecast_q, 0)
+            elif forecast_avg_points == 0:
+                pass
+            else:
+                initial_rate = q[mask][-1]
+                rate_difference = initial_rate - fitted_rate_at_last_t
+                forecast_q += rate_difference
+                forecast_q = np.maximum(forecast_q, 0)
+
+            # Update the existing figure: remove prior forecast lines and plot new one
+            ax = self.figure.axes[0]
+            for line in ax.lines[:]:
+                try:
+                    label = line.get_label()
+                except Exception:
+                    label = ''
+                if label and ('Forecast' in label or 'Year Forecast' in label):
+                    line.remove()
+
+            forecast_years = forecast_duration / 12
+            if forecast_years in list(range(1, 31)):
+                forecast_label = f'{int(forecast_years)}-Year Forecast'
+            else:
+                forecast_label = f'{forecast_duration}-Month Forecast'
+            ax.plot(forecast_dates, forecast_q, '--', color='blue', label=forecast_label, linewidth=2)
+            ax.legend()
+
+            if self.canvas:
+                self.canvas.draw()
+                QApplication.processEvents()
+
+            return True
+        except Exception as e:
+            print(f"Error updating forecast line from model_data: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def load_current_well(self):
         """Show dialog to select and load an analysis for current well"""
         well_name = self.get_primary_well()
@@ -2087,16 +2284,28 @@ class DeclineCurveApp(QMainWindow):
                                                    f"Analysis loaded successfully from:\n{filepath.name}\n\nPlot restored from saved model data.")
                             return
                     
-                    # If no model_data, fall back to running analysis
-                    # Re-run analysis to display chart
-                    QApplication.processEvents()
-                    self.run_analysis()
+                    # If no model_data, restore from saved params (qi, Di, b) to avoid re-running
+                    if self.restore_plot_from_params(data):
+                        results_text = data.get('results_text', '')
+                        if results_text:
+                            self.results_text.clear()
+                            self.results_text.setText(results_text)
+                        self.current_well_name = well_name
+                        analysis_params = data.get('analysis_params', {})
+                        if analysis_params:
+                            self.current_analysis_params = analysis_params.copy()
+                        self.update_vertical_line_from_inputs()
+                        QApplication.processEvents()
+                        self._restore_references_after_analysis()
+                        QMessageBox.information(self, "Success",
+                                               f"Analysis loaded successfully from:\n{filepath.name}\n\nPlot restored from saved parameters.")
+                        return
+                    # As a last resort, we could re-run, but requirement is to avoid re-running
+                    QMessageBox.information(self, "Loaded",
+                                           f"Analysis loaded from:\n{filepath.name}\n\nNo cached plot found; showing saved results without re-running.")
                     
                     # Restore references AFTER everything else is done
                     self._restore_references_after_analysis()
-                    
-                    QMessageBox.information(self, "Success", 
-                                           f"Analysis loaded successfully from:\n{filepath.name}")
                 else:
                     QMessageBox.critical(self, "Error", "Failed to load analysis file")
     
@@ -2139,16 +2348,27 @@ class DeclineCurveApp(QMainWindow):
                                            f"Latest analysis loaded successfully!\n\nFile: {filepath.name}\n\nPlot restored from saved model data.")
                     return
             
-            # If no model_data, fall back to running analysis
-            # Re-run analysis to display chart
-            QApplication.processEvents()
-            self.run_analysis()
+            # If no model_data, restore from saved params (qi, Di, b) to avoid re-running
+            if self.restore_plot_from_params(data):
+                results_text = data.get('results_text', '')
+                if results_text:
+                    self.results_text.clear()
+                    self.results_text.setText(results_text)
+                self.current_well_name = well_name
+                analysis_params = data.get('analysis_params', {})
+                if analysis_params:
+                    self.current_analysis_params = analysis_params.copy()
+                self.update_vertical_line_from_inputs()
+                QApplication.processEvents()
+                self._restore_references_after_analysis()
+                QMessageBox.information(self, "Success",
+                                       f"Latest analysis loaded successfully!\n\nFile: {filepath.name}\n\nPlot restored from saved parameters.")
+                return
             
-            # Restore references AFTER everything else is done
+            # As a last resort, avoid re-running and just show a notice
             self._restore_references_after_analysis()
-            
-            QMessageBox.information(self, "Success", 
-                                   f"Latest analysis loaded successfully!\n\nFile: {filepath.name}")
+            QMessageBox.information(self, "Loaded",
+                                   f"Latest analysis loaded!\n\nFile: {filepath.name}\n\nNo cached plot found; showing saved results without re-running.")
         else:
             QMessageBox.critical(self, "Error", "Failed to load analysis file")
     
@@ -2577,146 +2797,134 @@ class DeclineCurveApp(QMainWindow):
         model_data = data['model_data']
         if not model_data:
             return False
-        
         try:
-            # Reconstruct data structures from saved model_data
+            # Reconstruct fit & data
             if 'popt' not in model_data or model_data['popt'] is None:
                 return False
-            
             popt = np.array(model_data['popt'])
             mask = np.array(model_data['mask'], dtype=bool)
             t = np.array(model_data['t'])
             q = np.array(model_data['q'])
-            
-            # Reconstruct DataFrames
             df_well_prod_dates = pd.to_datetime(model_data['df_well_prod_dates'])
             df_full_prod_dates = pd.to_datetime(model_data['df_full_prod_dates'])
-            
-            df_well = pd.DataFrame({
-                'Prod_Date': df_well_prod_dates,
-                'oil_prod_daily': q
-            })
+            df_well = pd.DataFrame({'Prod_Date': df_well_prod_dates, 'oil_prod_daily': q})
             df_well['t'] = t
-            
-            df_full = pd.DataFrame({
-                'Prod_Date': df_full_prod_dates
-            })
+            df_full = pd.DataFrame({'Prod_Date': df_full_prod_dates})
             q_original_full = np.array(model_data['q_original_full'])
             q_smoothed_full = np.array(model_data['q_smoothed_full'])
-            
-            # Get plot options from data
+
             show_outliers = data.get('show_outliers', True)
             show_pre_decline = data.get('show_pre_decline', True)
             show_forecast = data.get('show_forecast', True)
             show_inliers = data.get('show_inliers', True)
             show_channel = data.get('show_channel', False)
-            
-            # Get forecast data
-            forecast_dates = [pd.to_datetime(d) for d in model_data['forecast_dates']]
-            forecast_q = np.array(model_data['forecast_q'])
-            
-            # Get parameters for plot
-            analysis_params = data.get('analysis_params', {})
-            outlier_threshold = analysis_params.get('outlier_threshold', 2.0)
-            forecast_avg_points_str = data.get('forecast_avg_points', 'The Model')
-            if forecast_avg_points_str == 'The Model':
-                forecast_avg_points = 0
-            elif forecast_avg_points_str == 'The Last Rate':
-                forecast_avg_points = 1
-            else:
-                try:
-                    forecast_avg_points = int(forecast_avg_points_str)
-                except:
+
+            # Use current dropdown
+            if hasattr(self, 'forecast_avg_points_combo'):
+                txt = self.forecast_avg_points_combo.currentText()
+                if txt == 'The Model':
+                    forecast_avg_points = 0
+                elif txt == 'The Last Rate':
                     forecast_avg_points = 1
-            start_method = analysis_params.get('start_method', data.get('start_method', ''))
+                else:
+                    try:
+                        forecast_avg_points = int(txt)
+                    except Exception:
+                        forecast_avg_points = 1
+            else:
+                forecast_avg_points_str = data.get('forecast_avg_points', 'The Model')
+                if forecast_avg_points_str == 'The Model':
+                    forecast_avg_points = 0
+                elif forecast_avg_points_str == 'The Last Rate':
+                    forecast_avg_points = 1
+                else:
+                    try:
+                        forecast_avg_points = int(forecast_avg_points_str)
+                    except Exception:
+                        forecast_avg_points = 1
+
+            start_method = data.get('start_method', '')
             forecast_duration = int(data.get('forecast_duration', 60))
-            
-            # Get reference models
+
+            # Reference models (unchanged)
             reference_models = []
             active_references = data.get('active_references', [])
             for ref_well_name in active_references:
                 ref_data = None
-                # Try direct lookup first
                 if ref_well_name in self.session_analyses:
                     ref_data = self.session_analyses[ref_well_name]
                 else:
-                    # If not found, check if it's stored with a different key format
-                    # (e.g., aggregated wells might use consistent keys)
                     for key, key_data in self.session_analyses.items():
-                        # Check if this key corresponds to the reference well
                         saved_wells = key_data.get('applied_wells', [key])
-                        # For single wells, check if well_name matches
                         if len(saved_wells) == 1 and saved_wells[0] == ref_well_name:
                             ref_data = key_data
-                            ref_well_name = key  # Update to use the consistent key
+                            ref_well_name = key
                             break
-                        # For aggregated wells, check if the original well_name matches
                         elif key_data.get('well_name') == ref_well_name:
                             ref_data = key_data
-                            ref_well_name = key  # Update to use the consistent key
+                            ref_well_name = key
                             break
-                
                 if ref_data and 'qi' in ref_data and 'Di' in ref_data and 'b' in ref_data:
                     hierarchy_parts = ref_well_name.split('\\')
                     if len(hierarchy_parts) >= 3:
                         display_name = f"{hierarchy_parts[-3]}\\{hierarchy_parts[-2]}\\{hierarchy_parts[-1]}"
                     else:
-                        # For aggregated wells, use _build_selection_title for display
                         saved_wells = ref_data.get('applied_wells', [ref_well_name])
                         if len(saved_wells) > 1:
                             display_name = self._build_selection_title(saved_wells)
                         else:
                             display_name = ref_well_name
-                    reference_models.append({
-                        'Di': ref_data['Di'],
-                        'b': ref_data['b'],
-                        'name': display_name,
-                        'well_name': ref_well_name
-                    })
-            
-            # Recreate plot using create_arps_plot but with saved forecast
-            # We need to create a modified version that uses the saved forecast_q
+                    reference_models.append({'Di': ref_data['Di'], 'b': ref_data['b'], 'name': display_name, 'well_name': ref_well_name})
+
+            # Recalculate forecast_q using the current dropdown
+            last_date = df_well['Prod_Date'].max()
+            forecast_months = forecast_duration
+            forecast_dates = pd.date_range(start=last_date + pd.DateOffset(months=1), periods=forecast_months, freq='MS')
+            last_t = t[-1]
+            forecast_t = last_t + np.arange(1, forecast_months + 1)
+            qi_original, Di, b = popt
+            def arps_hyperbolic(T, qi, Di_, b_):
+                if abs(b_) < 1e-10:
+                    return qi * np.exp(-Di_ * T)
+                return qi / (1 + b_ * Di_ * T) ** (1 / b_)
+            forecast_q = arps_hyperbolic(forecast_t, qi_original, Di, b)
+            if forecast_avg_points > 1:
+                n_points = min(forecast_avg_points, np.sum(mask))
+                initial_rate = np.mean(q[mask][-n_points:])
+                fitted_rate_at_last_t = arps_hyperbolic(last_t, qi_original, Di, b)
+                rate_difference = initial_rate - fitted_rate_at_last_t
+                forecast_q += rate_difference
+                forecast_q = np.maximum(forecast_q, 0)
+            elif forecast_avg_points == 0:
+                pass
+            else:
+                initial_rate = q[mask][-1]
+                fitted_rate_at_last_t = arps_hyperbolic(last_t, qi_original, Di, b)
+                rate_difference = initial_rate - fitted_rate_at_last_t
+                forecast_q += rate_difference
+                forecast_q = np.maximum(forecast_q, 0)
+
             well_id = data.get('well_name', 'Unknown')
             fig = create_arps_plot(df_well, t, q, mask, popt, well_id, df_full,
-                                  q_original_full, q_smoothed_full, outlier_threshold,
+                                  q_original_full, q_smoothed_full, data.get('outlier_threshold', 2.0),
                                   forecast_avg_points, start_method,
                                   show_outliers, show_pre_decline, show_forecast,
                                   show_inliers, show_channel, forecast_duration,
                                   reference_models=reference_models)
-            
-            # Override forecast plot with saved forecast data
+            # Remove cached forecast line & draw recalculated one
             if fig and show_forecast and len(forecast_dates) > 0:
                 ax = fig.axes[0]
-                # Remove existing forecast lines and add the saved forecast
                 for line in ax.lines[:]:
                     if line.get_label() and ('Forecast' in line.get_label() or 'Year Forecast' in line.get_label()):
                         line.remove()
-                
-                # Re-add forecast with saved data
                 forecast_years = forecast_duration / 12
                 if forecast_years in list(range(1, 31)):
                     forecast_label = f'{int(forecast_years)}-Year Forecast'
                 else:
                     forecast_label = f'{forecast_duration}-Month Forecast'
-                ax.plot(forecast_dates, forecast_q, '--', color='blue',
-                       label=forecast_label, linewidth=2)
-                
-                # Update legend
+                ax.plot(forecast_dates, forecast_q, '--', color='blue', label=forecast_label, linewidth=2)
                 ax.legend()
-                fig.canvas.draw()
-            
-            if fig:
-                # Update title for aggregated wells using _build_selection_title
-                applied_wells = data.get('applied_wells', [])
-                if len(applied_wells) > 1:
-                    title = self._build_selection_title(applied_wells)
-                    if title and fig.axes:
-                        fig.axes[0].set_title(title)
-                        fig.canvas.draw()
-                
-                self._display_figure(fig)
-                return True
-            
+                fig.canvas.draw()            
             return False
         except Exception as e:
             print(f"Error restoring plot from model_data: {e}")
@@ -2779,28 +2987,6 @@ class DeclineCurveApp(QMainWindow):
                             self.current_well_name = self._get_analysis_key(applied_wells)
                         else:
                             self.current_well_name = well_name
-                        
-                        # Restore model_data and reference_models for LLM report generation
-                        if 'model_data' in data and data['model_data']:
-                            self.current_model_data = data['model_data']
-                        
-                        # Restore reference models if available
-                        active_refs = data.get('active_references', [])
-                        if active_refs:
-                            restored_ref_models = []
-                            for ref_info in active_refs:
-                                ref_name = ref_info.get('well_name', '')
-                                if ref_name in self.session_analyses:
-                                    ref_data = self.session_analyses[ref_name]
-                                    restored_ref_models.append({
-                                        'name': ref_info.get('well_name', 'Unknown'),
-                                        'Di': ref_data.get('Di', 0),
-                                        'b': ref_data.get('b', 0),
-                                        'well_name': ref_name
-                                    })
-                            self.current_reference_models = restored_ref_models if restored_ref_models else None
-                        else:
-                            self.current_reference_models = None
                         
                         analysis_params = data.get('analysis_params', {})
                         if analysis_params:
@@ -3543,202 +3729,213 @@ class DeclineCurveApp(QMainWindow):
         # Update the analysis list when tab is shown
         self.main_tabs.currentChanged.connect(self.update_analysis_list)
 
-    def create_report_tab(self):
-        """Create the LLM Report Generation tab"""
-        report_tab = QWidget()
-        layout = QVBoxLayout(report_tab)
-        layout.setSpacing(10)
+    def create_ai_report_tab(self):
+        """Create the AI Report tab for generating AI-powered analysis reports"""
+        ai_report_tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setContentsMargins(20, 20, 20, 20)
+        ai_report_tab.setLayout(layout)
         
-        # Header section
-        header_layout = QHBoxLayout()
-        header_label = QLabel("AI-Powered Analysis Report")
-        header_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #007bff;")
-        header_layout.addWidget(header_label)
-        header_layout.addStretch()
+        # Title and connection status
+        title_layout = QHBoxLayout()
+        title_label = QLabel("AI-Powered Analysis Report")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 18px;
+                font-weight: bold;
+                color: #2c3e50;
+            }
+        """)
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
         
-        # Model status label
-        self.llm_status_label = QLabel("")
-        self.llm_status_label.setStyleSheet("font-size: 11px; color: #6c757d;")
-        header_layout.addWidget(self.llm_status_label)
-        layout.addLayout(header_layout)
+        # Connection status indicator
+        self.ai_connection_status = QLabel("")
+        self.ai_connection_status.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                font-weight: 500;
+            }
+        """)
+        title_layout.addWidget(self.ai_connection_status)
         
-        # Info section
-        info_text = QTextEdit()
-        info_text.setMaximumHeight(80)
-        info_text.setReadOnly(True)
-        info_text.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 8px;")
-        info_text.setPlainText(
-            "Generate a professional technical report from your decline curve analysis.\n"
-            "The report includes parameter interpretation, forecast analysis, data quality assessment, "
-            "comparison with reference models (if any), and recommendations.\n\n"
-            "Note: Requires Ollama installed and llama3.2:3b model downloaded. Run 'ollama pull llama3.2:3b' if needed."
+        layout.addLayout(title_layout)
+        
+        # Description
+        description_label = QLabel(
+            "Generate a professional technical report from your decline curve analysis. "
+            "The report includes parameter interpretation, forecast analysis, data quality "
+            "assessment, comparison with reference models (if any), and recommendations."
         )
-        layout.addWidget(info_text)
+        description_label.setWordWrap(True)
+        description_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                color: #6c757d;
+                padding: 10px;
+                background-color: #f8f9fa;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(description_label)
         
-        # Button layout
+        # Button group
         button_layout = QHBoxLayout()
         
         self.generate_report_btn = QPushButton("Generate Report")
         self.generate_report_btn.setProperty("class", "primary")
-        self.generate_report_btn.clicked.connect(self.generate_llm_report)
+        self.generate_report_btn.clicked.connect(self.on_generate_ai_report)
         button_layout.addWidget(self.generate_report_btn)
         
         self.test_connection_btn = QPushButton("Test Connection")
         self.test_connection_btn.setProperty("class", "secondary")
-        self.test_connection_btn.clicked.connect(self.test_llm_connection)
+        self.test_connection_btn.clicked.connect(self.on_test_ai_connection)
         button_layout.addWidget(self.test_connection_btn)
         
-        button_layout.addStretch()
         layout.addLayout(button_layout)
         
-        # Report text area
+        # Generated Report section
         report_label = QLabel("Generated Report:")
-        report_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        report_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                color: #2c3e50;
+                margin-top: 10px;
+            }
+        """)
         layout.addWidget(report_label)
         
-        self.report_text = QTextEdit()
-        self.report_text.setReadOnly(True)
-        self.report_text.setPlaceholderText(
-            "Run an analysis first, then click 'Generate Report' to create an AI-powered technical report."
+        self.ai_report_text = QTextEdit()
+        self.ai_report_text.setReadOnly(True)
+        self.ai_report_text.setPlaceholderText(
+            "Run an analysis first, then click 'Generate Report' to create an AI-powered technical "
+            "report."
         )
-        layout.addWidget(self.report_text)
-        
-        # Progress indicator (initially hidden)
-        self.report_progress_label = QLabel("")
-        self.report_progress_label.setStyleSheet("color: #007bff; font-style: italic;")
-        self.report_progress_label.hide()
-        layout.addWidget(self.report_progress_label)
+        layout.addWidget(self.ai_report_text)
         
         # Add to main tabs
-        self.main_tabs.addTab(report_tab, "AI Report")
+        self.main_tabs.addTab(ai_report_tab, "AI Report")
         
-        # Test connection on startup
-        if LLM_AVAILABLE and self.llm_generator:
-            QTimer.singleShot(500, self.test_llm_connection)
+        # Initial connection test (silent, just updates status)
+        self.on_test_ai_connection(show_message=False)
 
-    def test_llm_connection(self):
-        """Test connection to Ollama and update status"""
-        if not LLM_AVAILABLE:
-            self.llm_status_label.setText("❌ LLM not available (install ollama package)")
-            self.llm_status_label.setStyleSheet("font-size: 11px; color: #dc3545;")
+    def on_test_ai_connection(self, show_message=True):
+        """Test connection to Ollama"""
+        try:
+            success, message = self.llm_generator.test_connection()
+            if success:
+                self.ai_connection_status.setText("✓ Connected")
+                self.ai_connection_status.setStyleSheet("""
+                    QLabel {
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: #28a745;
+                    }
+                """)
+                if show_message:
+                    QMessageBox.information(self, "Connection Test", message)
+            else:
+                self.ai_connection_status.setText("✗ Disconnected")
+                self.ai_connection_status.setStyleSheet("""
+                    QLabel {
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: #dc3545;
+                    }
+                """)
+                if show_message:
+                    QMessageBox.warning(self, "Connection Test Failed", message)
+        except Exception as e:
+            self.ai_connection_status.setText("✗ Error")
+            self.ai_connection_status.setStyleSheet("""
+                QLabel {
+                    font-size: 12px;
+                    font-weight: 500;
+                    color: #dc3545;
+                }
+            """)
+            if show_message:
+                QMessageBox.critical(self, "Error", f"Error testing connection: {str(e)}")
+
+    def on_generate_ai_report(self):
+        """Generate AI-powered report for the current analysis"""
+        # Check if there's a current analysis
+        if not self.applied_wells:
+            QMessageBox.warning(self, "No Analysis", 
+                              "Please run an analysis first before generating a report.")
             return
         
-        if not self.llm_generator:
-            self.llm_status_label.setText("❌ LLM generator not initialized")
-            self.llm_status_label.setStyleSheet("font-size: 11px; color: #dc3545;")
-            return
-        
-        success, message = self.llm_generator.test_connection()
-        if success:
-            self.llm_status_label.setText("✓ Connected")
-            self.llm_status_label.setStyleSheet("font-size: 11px; color: #28a745;")
+        # Get the analysis key (works for both single and aggregated wells)
+        if hasattr(self, 'applied_wells') and self.applied_wells and len(self.applied_wells) > 1:
+            analysis_key = self._get_analysis_key(self.applied_wells)
+            if not analysis_key:
+                analysis_key = self.get_primary_well()
         else:
-            self.llm_status_label.setText("❌ " + message[:50] + "..." if len(message) > 50 else "❌ " + message)
-            self.llm_status_label.setStyleSheet("font-size: 11px; color: #dc3545;")
-    
-    def generate_llm_report(self):
-        """Generate LLM report from current analysis"""
-        if not LLM_AVAILABLE or not self.llm_generator:
-            QMessageBox.warning(
-                self, 
-                "LLM Not Available",
-                "LLM report generation is not available.\n\n"
-                "Please install the ollama package:\n"
-                "pip install ollama\n\n"
-                "And ensure Ollama is running with the llama3.2:3b model:\n"
-                "ollama pull llama3.2:3b"
-            )
-            return
+            analysis_key = self.get_primary_well()
         
         # Check if we have analysis data
-        if not self.current_well_name or not self.current_model_data:
-            QMessageBox.warning(
-                self,
-                "No Analysis Data",
-                "Please run an analysis first before generating a report."
-            )
+        if not analysis_key or analysis_key not in self.session_analyses:
+            QMessageBox.warning(self, "No Analysis", 
+                              "No analysis data found for the current selection. "
+                              "Please run an analysis first.")
             return
         
-        # Check if worker is already running
-        if self.llm_report_worker and self.llm_report_worker.isRunning():
-            QMessageBox.information(
-                self,
-                "Report Generation in Progress",
-                "A report is already being generated. Please wait for it to complete."
-            )
-            return
+        analysis_data = self.session_analyses[analysis_key]
         
-        # Show progress
-        self.report_progress_label.setText("Generating report... This may take 10-30 seconds.")
-        self.report_progress_label.show()
+        # Disable button during generation
         self.generate_report_btn.setEnabled(False)
-        self.report_text.clear()
-        self.report_text.setPlainText("Generating report, please wait...")
+        self.generate_report_btn.setText("Generating...")
         
-        # Extract analysis data
         try:
-            # Get reference models from current analysis or session
-            reference_models = self.current_reference_models if self.current_reference_models else []
+            # Extract analysis data for LLM
+            results_text = analysis_data.get('results_text', '')
+            model_data = analysis_data.get('model_data', {})
             
-            # If no current references, try to get from session
-            if not reference_models and self.current_well_name in self.session_analyses:
-                session_data = self.session_analyses[self.current_well_name]
-                active_refs = session_data.get('active_references', [])
-                if active_refs:
-                    reference_models = []
-                    for ref_info in active_refs:
-                        ref_name = ref_info.get('well_name', '')
-                        if ref_name in self.session_analyses:
-                            ref_data = self.session_analyses[ref_name]
-                            reference_models.append({
-                                'name': ref_info.get('well_name', 'Unknown'),
-                                'Di': ref_data.get('Di', 0),
-                                'b': ref_data.get('b', 0),
-                                'well_name': ref_name
-                            })
+            # Get reference models from active references
+            active_references = analysis_data.get('active_references', [])
+            reference_models = None
+            if active_references:
+                reference_models = []
+                for ref in active_references:
+                    ref_well_name = ref.get('well_name')
+                    if ref_well_name and ref_well_name in self.session_analyses:
+                        ref_data = self.session_analyses[ref_well_name]
+                        reference_models.append({
+                            'name': ref_data.get('well_name', 'Unknown'),
+                            'Di': ref_data.get('Di', 0),
+                            'b': ref_data.get('b', 0),
+                            'well_name': ref_data.get('well_name', 'Unknown')
+                        })
             
-            # Extract data using LLM generator
-            analysis_data = self.llm_generator.extract_analysis_data(
-                results=self.results_text.toPlainText(),
-                model_data=self.current_model_data,
-                well_name=self.current_well_name,
+            start_method = analysis_data.get('start_method', '')
+            
+            # Extract data using the LLM generator
+            extracted_data = self.llm_generator.extract_analysis_data(
+                results=results_text,
+                model_data=model_data,
+                well_name=analysis_key,
                 reference_models=reference_models,
-                start_method=self.current_analysis_params.get('start_method', '') if self.current_analysis_params else ''
+                start_method=start_method
             )
             
-            # Create worker thread
-            self.llm_report_worker = LLMReportWorker(self.llm_generator, analysis_data)
-            self.llm_report_worker.report_generated.connect(self.on_report_generated)
-            self.llm_report_worker.error_occurred.connect(self.on_report_error)
-            self.llm_report_worker.finished.connect(self.on_report_worker_finished)
-            self.llm_report_worker.start()
+            # Generate report
+            report = self.llm_generator.generate_report(extracted_data)
+            
+            # Display report
+            self.ai_report_text.clear()
+            self.ai_report_text.setPlainText(report)
             
         except Exception as e:
-            error_msg = f"Error preparing report generation: {str(e)}"
-            QMessageBox.critical(self, "Error", error_msg)
-            self.report_progress_label.hide()
+            QMessageBox.critical(self, "Error", 
+                               f"Error generating report: {str(e)}")
+        
+        finally:
+            # Re-enable button
             self.generate_report_btn.setEnabled(True)
-    
-    def on_report_generated(self, report_text):
-        """Handle successful report generation"""
-        self.report_text.setPlainText(report_text)
-        self.report_progress_label.setText("Report generated successfully!")
-        self.generate_report_btn.setEnabled(True)
-        QTimer.singleShot(3000, lambda: self.report_progress_label.hide())
-    
-    def on_report_error(self, error_msg):
-        """Handle report generation error"""
-        self.report_text.setPlainText(f"Error: {error_msg}")
-        self.report_progress_label.setText("Error generating report.")
-        self.report_progress_label.setStyleSheet("color: #dc3545; font-style: italic;")
-        self.generate_report_btn.setEnabled(True)
-        QTimer.singleShot(5000, lambda: self.report_progress_label.hide())
-    
-    def on_report_worker_finished(self):
-        """Handle worker thread completion"""
-        if self.llm_report_worker:
-            self.llm_report_worker.deleteLater()
-            self.llm_report_worker = None
+            self.generate_report_btn.setText("Generate Report")
 
     def create_reference_tab(self):
         reference_tab = QWidget()
@@ -4077,8 +4274,25 @@ class DeclineCurveApp(QMainWindow):
         # Update the current analysis params
         self.current_analysis_params['forecast_avg_points'] = forecast_avg_points
         
-        # Update the chart immediately
-        self.update_plot_options()
+        # Update only the forecast line using cached model data (no re-run, just vertical shift)
+        updated = False
+        try:
+            if hasattr(self, 'figure') and self.figure is not None and hasattr(self, 'session_analyses'):
+                analysis_key = self._get_analysis_key(self.applied_wells) if (hasattr(self, 'applied_wells') and self.applied_wells) else self.current_well_name
+                if analysis_key in self.session_analyses:
+                    updated = self.update_forecast_line_from_model_data(analysis_key)
+        except Exception:
+            updated = False
+        
+        # If lightweight update failed, fall back to restoring from cached data (still no re-run)
+        if not updated:
+            analysis_key = self._get_analysis_key(self.applied_wells) if (hasattr(self, 'applied_wells') and self.applied_wells) else self.current_well_name
+            if analysis_key and analysis_key in self.session_analyses:
+                data = self.session_analyses[analysis_key]
+                if 'model_data' in data and data['model_data'] is not None:
+                    self.restore_plot_from_model_data(data)
+                else:
+                    self.restore_plot_from_params(data)
         
         # Update session data if exists
         if hasattr(self, 'current_well_name') and self.current_well_name:
@@ -4190,7 +4404,36 @@ class DeclineCurveApp(QMainWindow):
                         self.save_current_settings_to_session()
                         return
             
-            # Fallback: re-run analysis if model_data not available
+            # Fallback: try restoring from saved qi/Di/b params to avoid re-running analysis
+            if analysis_key and analysis_key in self.session_analyses:
+                data_for_params = self.session_analyses[analysis_key]
+                # Update plot option flags in data copy
+                data_for_params = dict(data_for_params)
+                data_for_params['show_outliers'] = show_outliers
+                data_for_params['show_pre_decline'] = show_pre_decline
+                data_for_params['show_forecast'] = show_forecast
+                data_for_params['show_inliers'] = show_inliers
+                data_for_params['show_channel'] = show_channel
+                data_for_params['active_references'] = [ref['well_name'] for ref in reference_models]
+                if self.restore_plot_from_params(data_for_params):
+                    # Ensure canvas is refreshed
+                    if self.canvas:
+                        self.canvas.draw()
+                        QApplication.processEvents()
+                    # Update title for aggregated wells if needed
+                    if hasattr(self, 'applied_wells') and len(self.applied_wells) > 1 and self.figure:
+                        title = self._build_selection_title(self.applied_wells)
+                        if title and self.figure.axes:
+                            self.figure.axes[0].set_title(title)
+                            if self.canvas:
+                                self.canvas.draw()
+                    # Redraw vertical line if in manual mode
+                    self.update_vertical_line_from_inputs()
+                    # Save updated settings to session
+                    self.save_current_settings_to_session()
+                    return
+
+            # Last resort: re-run analysis if neither model_data nor params restore is available
             # Check if we're in aggregated mode and use appropriate data
             if len(self.applied_wells) > 1 and self.df_aggregated_cache is not None:
                 df_to_use = self.df_aggregated_cache
@@ -5087,21 +5330,6 @@ class DeclineCurveApp(QMainWindow):
                 'filter_params': filter_params,
                 'forecast_duration': forecast_duration
             }
-            
-            # Store model_data and reference_models for LLM report generation
-            try:
-                if model_data is not None:
-                    self.current_model_data = model_data
-                else:
-                    self.current_model_data = None
-            except NameError:
-                self.current_model_data = None
-            
-            # Store reference models for LLM report
-            try:
-                self.current_reference_models = reference_models if reference_models else None
-            except NameError:
-                self.current_reference_models = None
             
             # Redraw vertical line if in manual mode
             self.update_vertical_line_from_inputs()
